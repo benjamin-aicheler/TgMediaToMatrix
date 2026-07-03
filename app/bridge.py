@@ -29,13 +29,50 @@ try:
     MAX_MEDIA_SIZE_MB = int(os.environ.get("MAX_MEDIA_SIZE_MB", 50))
     MAX_MEDIA_SIZE_BYTES = MAX_MEDIA_SIZE_MB * 1024 * 1024
 
-    # Extract channels, ignoring empty elements
+    # Extract channels, ignoring empty elements, supporting channel_id:topic_id formats
     TG_CHANNELS_RAW = get_env_or_raise("TG_CHANNELS")
-    TG_CHANNELS = [
-        int(i.strip()) if i.strip().replace('-', '').isdigit() else i.strip()
-        for i in TG_CHANNELS_RAW.split(",")
-        if i.strip()
-    ]
+    TG_CHANNELS = []
+    TG_TOPIC_FILTERS = {}  # maps base_chat_id -> set of topic_ids (ints)
+    TG_UNFILTERED_CHANNELS = set()  # tracks channels configured to allow all topics
+
+    for item in TG_CHANNELS_RAW.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if ":" in item:
+            parts = item.split(":", 1)
+            chan_part = parts[0].strip()
+            topic_part = parts[1].strip()
+
+            if chan_part.replace('-', '').isdigit():
+                chan_id = int(chan_part)
+            else:
+                chan_id = chan_part
+
+            if topic_part.isdigit():
+                topic_id = int(topic_part)
+            else:
+                raise ValueError(f"Invalid topic ID in '{item}'")
+
+            TG_CHANNELS.append(chan_id)
+            if chan_id not in TG_TOPIC_FILTERS:
+                TG_TOPIC_FILTERS[chan_id] = set()
+            TG_TOPIC_FILTERS[chan_id].add(topic_id)
+        else:
+            if item.replace('-', '').isdigit():
+                chan_id = int(item)
+            else:
+                chan_id = item
+            TG_CHANNELS.append(chan_id)
+            TG_UNFILTERED_CHANNELS.add(chan_id)
+
+    # De-duplicate TG_CHANNELS list while preserving order
+    unique_channels = []
+    for c in TG_CHANNELS:
+        if c not in unique_channels:
+            unique_channels.append(c)
+    TG_CHANNELS = unique_channels
+
     if not TG_CHANNELS:
         raise ValueError("TG_CHANNELS must contain at least one valid channel identifier.")
 
@@ -45,6 +82,31 @@ except Exception as init_err:
 
 # Cache for already processed album IDs
 PROCESSED_ALBUMS = set()
+
+# Cache for resolved topic names
+TOPIC_NAMES_CACHE = {}
+
+async def get_topic_name(client, chat_entity, topic_id):
+    if not topic_id:
+        return None
+    cache_key = (chat_entity.id, topic_id)
+    if cache_key in TOPIC_NAMES_CACHE:
+        return TOPIC_NAMES_CACHE[cache_key]
+    
+    try:
+        from telethon.tl.functions.channels import GetForumTopicsByIDRequest
+        result = await client(GetForumTopicsByIDRequest(
+            channel=chat_entity,
+            topics=[topic_id]
+        ))
+        if result and result.topics:
+            name = result.topics[0].title
+            TOPIC_NAMES_CACHE[cache_key] = name
+            return name
+    except Exception as e:
+        logging.debug(f"Could not fetch topic name for topic {topic_id} in {chat_entity.id}: {e}")
+        
+    return f"Topic {topic_id}"
 
 tg_client = TelegramClient(
     'session/tgmabr', 
@@ -180,6 +242,31 @@ async def master_handler(event):
     if not event.message.media:
         return
 
+    # Check for topic / thread details (subchannels in forums)
+    topic_id = None
+    r = event.message.reply_to
+    if r and getattr(r, 'forum_topic', False):
+        topic_id = r.reply_to_top_id if r.reply_to_top_id is not None else r.reply_to_msg_id
+
+    # Check if we should filter by topic
+    chat_id = event.chat_id
+    chat_username = event.chat.username if event.chat else None
+
+    allowed_topics = None
+    # If the channel itself was configured without any topic filter, allow all topics.
+    if chat_id in TG_UNFILTERED_CHANNELS or chat_username in TG_UNFILTERED_CHANNELS:
+        pass
+    else:
+        if chat_id in TG_TOPIC_FILTERS:
+            allowed_topics = TG_TOPIC_FILTERS[chat_id]
+        elif chat_username in TG_TOPIC_FILTERS:
+            allowed_topics = TG_TOPIC_FILTERS[chat_username]
+
+    if allowed_topics is not None:
+        if topic_id not in allowed_topics:
+            return
+
+    # Resolve channel name and optional topic name
     channel_name = str(event.chat_id)
     if event.chat:
         if hasattr(event.chat, 'title') and event.chat.title:
@@ -187,7 +274,15 @@ async def master_handler(event):
         elif hasattr(event.chat, 'username') and event.chat.username:
             channel_name = event.chat.username
 
-    chat_identifier = f"{channel_name} ({event.chat_id})"
+    topic_name = None
+    if topic_id:
+        topic_name = await get_topic_name(tg_client, event.chat, topic_id)
+
+    channel_display = channel_name
+    if topic_name:
+        channel_display = f"{channel_name} - {topic_name}"
+
+    chat_identifier = f"{channel_display} ({event.chat_id})"
 
     file_size = event.message.file.size if event.message.file else 0
     if file_size > MAX_MEDIA_SIZE_BYTES:
@@ -222,14 +317,14 @@ async def master_handler(event):
                         logging.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({MAX_MEDIA_SIZE_MB} MB)")
                         continue
                     
-                await process_and_upload_media(msg, chat_identifier, channel_name)
+                await process_and_upload_media(msg, chat_identifier, channel_display)
         except Exception as e:
             logging.error(f"[{chat_identifier}] Error loading album {album_id}: {e}")
             
         await asyncio.sleep(10)
         PROCESSED_ALBUMS.discard(album_id)
     else:
-        await process_and_upload_media(event.message, chat_identifier, channel_name)
+        await process_and_upload_media(event.message, chat_identifier, channel_display)
 
 
 async def main():
