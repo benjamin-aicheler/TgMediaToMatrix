@@ -3,7 +3,7 @@ import io
 import asyncio
 import logging
 from telethon import TelegramClient, events
-from nio import AsyncClient, UploadResponse
+from nio import AsyncClient, UploadResponse, RoomSendResponse, RoomSendError
 
 # Set up professional logging format
 logging.basicConfig(
@@ -116,16 +116,16 @@ async def process_and_upload_media(message, source_chat):
         # Extract additional metadata from Telegram attributes
         if message.document and message.document.attributes:
             for attr in message.document.attributes:
-                if hasattr(attr, 'duration'):
-                    info_dict["duration"] = attr.duration * 1000
-                if hasattr(attr, 'w') and hasattr(attr, 'h'):
-                    info_dict["w"] = attr.w
-                    info_dict["h"] = attr.h
+                if hasattr(attr, 'duration') and attr.duration is not None:
+                    info_dict["duration"] = int(attr.duration * 1000)
+                if hasattr(attr, 'w') and attr.w is not None and hasattr(attr, 'h') and attr.h is not None:
+                    info_dict["w"] = int(attr.w)
+                    info_dict["h"] = int(attr.h)
         elif message.photo and message.photo.sizes:
             largest = message.photo.sizes[-1]
-            if hasattr(largest, 'w') and hasattr(largest, 'h'):
-                info_dict["w"] = largest.w
-                info_dict["h"] = largest.h
+            if hasattr(largest, 'w') and largest.w is not None and hasattr(largest, 'h') and largest.h is not None:
+                info_dict["w"] = int(largest.w)
+                info_dict["h"] = int(largest.h)
 
         # Thumbnail upload for videos
         if msg_type == "m.video":
@@ -159,7 +159,12 @@ async def process_and_upload_media(message, source_chat):
             message_type="m.room.message",
             content=matrix_content
         )
-        logging.info(f"[{source_chat}] Event successfully posted in Matrix room (Event ID: {getattr(send_response, 'event_id', 'Unknown')})")
+        if isinstance(send_response, RoomSendResponse):
+            logging.info(f"[{source_chat}] Event successfully posted in Matrix room (Event ID: {send_response.event_id})")
+        elif isinstance(send_response, RoomSendError):
+            logging.error(f"[{source_chat}] Failed to post event to Matrix room: {send_response.message} (status code: {send_response.status_code})")
+        else:
+            logging.error(f"[{source_chat}] Unknown response type when posting event to Matrix room: {send_response}")
             
     except Exception as e:
         logging.error(f"[{source_chat}] General error during Matrix transfer of {filename}: {e}")
