@@ -29,7 +29,7 @@ TG_CHANNELS = [int(i.strip()) if i.strip().replace('-', '').isdigit() else i.str
 PROCESSED_ALBUMS = set()
 
 tg_client = TelegramClient(
-    'session/tg_matrix_bridge', 
+    'session/tgmabr', 
     TG_API_ID, 
     TG_API_HASH,
     device_model="Desktop",
