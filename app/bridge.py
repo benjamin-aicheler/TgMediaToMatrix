@@ -157,7 +157,8 @@ async def process_and_upload_media(message, source_chat, channel_name):
         upload_resp, _ = await matrix_client.upload(
             io.BytesIO(media_bytes),
             content_type=mime_type,
-            filename=filename
+            filename=filename,
+            filesize=len(media_bytes)
         )
         
         if not isinstance(upload_resp, UploadResponse):
@@ -197,7 +198,8 @@ async def process_and_upload_media(message, source_chat, channel_name):
                     thumb_resp, _ = await matrix_client.upload(
                         io.BytesIO(thumb_bytes),
                         content_type="image/jpeg",
-                        filename="thumbnail.jpg"
+                        filename="thumbnail.jpg",
+                        filesize=len(thumb_bytes)
                     )
                     if isinstance(thumb_resp, UploadResponse):
                         info_dict["thumbnail_url"] = thumb_resp.content_uri
