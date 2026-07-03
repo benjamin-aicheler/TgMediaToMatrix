@@ -190,10 +190,11 @@ async def process_and_upload_media(message, source_chat, channel_name):
                 info_dict["w"] = int(largest.w)
                 info_dict["h"] = int(largest.h)
 
-        # Thumbnail upload for videos
-        if msg_type == "m.video":
+        # Thumbnail upload for videos and images
+        if msg_type in ("m.video", "m.image"):
             try:
-                thumb_bytes = await message.download_media(thumb=-1, file=bytes)
+                thumb_idx = -1 if msg_type == "m.video" else 0
+                thumb_bytes = await message.download_media(thumb=thumb_idx, file=bytes)
                 if thumb_bytes:
                     thumb_resp, _ = await matrix_client.upload(
                         io.BytesIO(thumb_bytes),
