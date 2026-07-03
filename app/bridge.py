@@ -180,14 +180,14 @@ async def master_handler(event):
     if not event.message.media:
         return
 
-    chat_identifier = event.chat.username if event.chat.username else str(event.chat_id)
-
     channel_name = str(event.chat_id)
     if event.chat:
         if hasattr(event.chat, 'title') and event.chat.title:
             channel_name = event.chat.title
         elif hasattr(event.chat, 'username') and event.chat.username:
             channel_name = event.chat.username
+
+    chat_identifier = f"{channel_name} ({event.chat_id})"
 
     file_size = event.message.file.size if event.message.file else 0
     if file_size > MAX_MEDIA_SIZE_BYTES:
