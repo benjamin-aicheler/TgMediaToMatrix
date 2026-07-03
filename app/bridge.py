@@ -239,7 +239,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
                 logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
         body_text = f"[{channel_name}]"
-        formatted_body_text = f"<strong>[{channel_name}]</strong>"
+        formatted_body_text = f"[{channel_name}]"
 
         matrix_content = {
             "msgtype": msg_type,
