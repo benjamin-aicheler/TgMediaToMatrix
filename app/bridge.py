@@ -59,7 +59,7 @@ tg_client = TelegramClient(
 matrix_client = AsyncClient(MATRIX_HOMESERVER)
 matrix_client.access_token = MATRIX_ACCESS_TOKEN
 
-async def process_and_upload_media(message, source_chat):
+async def process_and_upload_media(message, source_chat, channel_name):
     """Process a single Telegram message and stream the media to Matrix"""
     mime_type = message.file.mime_type if message.file else None
     filename = message.file.name if message.file else None
@@ -146,9 +146,13 @@ async def process_and_upload_media(message, source_chat):
             except Exception as thumb_err:
                 logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
+        caption = message.message.strip() if message.message else ""
+        display_text = caption if caption else filename
+        body_text = f"[{channel_name}] {display_text}"
+
         matrix_content = {
             "msgtype": msg_type,
-            "body": filename,
+            "body": body_text,
             "url": content_uri
         }
         if info_dict:
@@ -177,6 +181,13 @@ async def master_handler(event):
         return
 
     chat_identifier = event.chat.username if event.chat.username else str(event.chat_id)
+
+    channel_name = str(event.chat_id)
+    if event.chat:
+        if hasattr(event.chat, 'title') and event.chat.title:
+            channel_name = event.chat.title
+        elif hasattr(event.chat, 'username') and event.chat.username:
+            channel_name = event.chat.username
 
     file_size = event.message.file.size if event.message.file else 0
     if file_size > MAX_MEDIA_SIZE_BYTES:
@@ -211,14 +222,14 @@ async def master_handler(event):
                         logging.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({MAX_MEDIA_SIZE_MB} MB)")
                         continue
                     
-                await process_and_upload_media(msg, chat_identifier)
+                await process_and_upload_media(msg, chat_identifier, channel_name)
         except Exception as e:
             logging.error(f"[{chat_identifier}] Error loading album {album_id}: {e}")
             
         await asyncio.sleep(10)
         PROCESSED_ALBUMS.discard(album_id)
     else:
-        await process_and_upload_media(event.message, chat_identifier)
+        await process_and_upload_media(event.message, chat_identifier, channel_name)
 
 
 async def main():
