@@ -47,7 +47,7 @@ try:
             if chan_part.replace('-', '').isdigit():
                 chan_id = int(chan_part)
             else:
-                chan_id = chan_part
+                chan_id = chan_part.lstrip('@').lower()
 
             if topic_part.isdigit():
                 topic_id = int(topic_part)
@@ -62,7 +62,7 @@ try:
             if item.replace('-', '').isdigit():
                 chan_id = int(item)
             else:
-                chan_id = item
+                chan_id = item.lstrip('@').lower()
             TG_CHANNELS.append(chan_id)
             TG_UNFILTERED_CHANNELS.add(chan_id)
 
@@ -283,16 +283,17 @@ async def master_handler(event):
     # Check if we should filter by topic
     chat_id = event.chat_id
     chat_username = event.chat.username if event.chat else None
+    chat_username_lower = chat_username.lower() if chat_username else None
 
     allowed_topics = None
     # If the channel itself was configured without any topic filter, allow all topics.
-    if chat_id in TG_UNFILTERED_CHANNELS or chat_username in TG_UNFILTERED_CHANNELS:
+    if chat_id in TG_UNFILTERED_CHANNELS or (chat_username_lower and chat_username_lower in TG_UNFILTERED_CHANNELS):
         pass
     else:
         if chat_id in TG_TOPIC_FILTERS:
             allowed_topics = TG_TOPIC_FILTERS[chat_id]
-        elif chat_username in TG_TOPIC_FILTERS:
-            allowed_topics = TG_TOPIC_FILTERS[chat_username]
+        elif chat_username_lower and chat_username_lower in TG_TOPIC_FILTERS:
+            allowed_topics = TG_TOPIC_FILTERS[chat_username_lower]
 
     if allowed_topics is not None:
         if topic_id not in allowed_topics:
