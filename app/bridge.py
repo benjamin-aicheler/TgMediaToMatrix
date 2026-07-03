@@ -29,8 +29,8 @@ TG_CHANNELS = [int(i.strip()) if i.strip().replace('-', '').isdigit() else i.str
 PROCESSED_ALBUMS = set()
 
 tg_client = TelegramClient(
-    'session/tg_matrix_bridge', 
-    TG_API_ID, 
+    'session/tgmabr',
+    TG_API_ID,
     TG_API_HASH,
     device_model="Desktop",
     system_version="Windows 10",
@@ -41,7 +41,7 @@ async def process_and_upload_media(message, source_chat):
     """Verarbeitet eine einzelne Telegram-Nachricht und streamt das Medium zu Matrix"""
     mime_type = message.file.mime_type if message.file else None
     filename = message.file.name if message.file else None
-    
+
     if message.photo and not mime_type:
         mime_type = "image/jpeg"
         filename = f"telegram_photo_{message.id}.jpg"
@@ -56,7 +56,7 @@ async def process_and_upload_media(message, source_chat):
         filename = f"telegram_media_{message.id}.{ext}"
 
     logging.info(f"[{source_chat}] Verarbeite Medium: {filename} ({mime_type}). Starte Download von Telegram...")
-    
+
     try:
         media_bytes = await message.download_media(file=bytes)
         if not media_bytes:
@@ -67,7 +67,7 @@ async def process_and_upload_media(message, source_chat):
         return
 
     logging.info(f"[{source_chat}] Download abgeschlossen ({len(media_bytes)} Bytes). Starte HTTPX-Upload zu Matrix...")
-    
+
     upload_url = f"{MATRIX_HOMESERVER}/_matrix/media/v3/upload"
     headers = {
         "Authorization": f"Bearer {MATRIX_ACCESS_TOKEN}",
@@ -84,27 +84,32 @@ async def process_and_upload_media(message, source_chat):
                 headers=headers,
                 params=params
             )
-        
+
         if response.status_code != 200:
             logging.error(f"[{source_chat}] Matrix-Server hat den Upload abgelehnt! HTTP Status: {response.status_code} | Antwort: {response.text}")
             return
-            
+
         data = response.json()
         content_uri = data.get("content_uri")
-        
+
         if not content_uri:
             return
 
         logging.info(f"[{source_chat}] Upload erfolgreich! MXC-URI: {content_uri}. Sende Raum-Nachricht via matrix-nio...")
-        
+
         matrix_client = AsyncClient(MATRIX_HOMESERVER)
         matrix_client.access_token = MATRIX_ACCESS_TOKEN
-        
+
         try:
             msg_type = "m.image" if mime_type.startswith("image/") else "m.video"
-            info_dict = {}
-            
-            # Extraktion der Telegram Metadaten
+
+            # Basis-Info-Objekt mit der exakten Dateigröße der heruntergeladenen Bytes befüllen
+            info_dict = {
+                "size": len(media_bytes),
+                "mimetype": mime_type
+            }
+
+            # Extraktion weiterer Metadaten aus den Telegram-Attributen
             if message.document and message.document.attributes:
                 for attr in message.document.attributes:
                     if hasattr(attr, 'duration'):
@@ -143,7 +148,7 @@ async def process_and_upload_media(message, source_chat):
                                     "size": len(thumb_bytes)
                                 }
                 except Exception as thumb_err:
-                    logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
+                    logging.debug(f"[{source_chat}] Thumbnail übersprungen: {thumb_err}")
 
             matrix_content = {
                 "msgtype": msg_type,
@@ -161,7 +166,7 @@ async def process_and_upload_media(message, source_chat):
             logging.info(f"[{source_chat}] Event erfolgreich in Matrix-Raum gepostet (Event ID: {getattr(send_response, 'event_id', 'Unbekannt')})")
         finally:
             await matrix_client.close()
-            
+
     except Exception as e:
         logging.error(f"[{source_chat}] Allgemeiner Fehler bei der Matrix-Übertragung von {filename}: {e}")
 
@@ -181,26 +186,26 @@ async def master_handler(event):
 
     if event.message.grouped_id is not None:
         album_id = event.message.grouped_id
-        
+
         if album_id in PROCESSED_ALBUMS:
             return
-            
+
         PROCESSED_ALBUMS.add(album_id)
         logging.info(f"[{chat_identifier}] Neues Album (Grouped ID: {album_id}) erkannt. Warte auf vollständigen Empfang...")
-        
+
         await asyncio.sleep(2.5)
-        
+
         try:
             album_messages = await tg_client.get_messages(event.chat_id, min_id=event.message.id - 15, max_id=event.message.id + 15)
             filtered_messages = [m for m in album_messages if m.grouped_id == album_id]
-            
+
             logging.info(f"[{chat_identifier}] Verarbeite {len(filtered_messages)} Elemente aus dem Album {album_id}...")
             for msg in reversed(filtered_messages):
                 try:
                     if msg.media:
                         file_info = await tg_client.get_file_info(msg.media)
                         exact_size = file_info.size if hasattr(file_info, 'size') else (msg.file.size if msg.file else 0)
-                        
+
                         if exact_size > MAX_MEDIA_SIZE_BYTES:
                             logging.warning(f"[{chat_identifier}] Element im Album übersprungen: Reale Größe ({round(exact_size / (1024 * 1024), 2)} MB) überschreitet Limit ({MAX_MEDIA_SIZE_MB} MB).")
                             continue
@@ -208,11 +213,11 @@ async def master_handler(event):
                     logging.debug(f"[{chat_identifier}] Konnte exakte Größe nicht via API prüfen: {size_err}")
                     if msg.file and msg.file.size > MAX_MEDIA_SIZE_BYTES:
                         continue
-                    
+
                 await process_and_upload_media(msg, chat_identifier)
         except Exception as e:
             logging.error(f"[{chat_identifier}] Fehler beim Laden des Albums {album_id}: {e}")
-            
+
         await asyncio.sleep(10)
         PROCESSED_ALBUMS.discard(album_id)
     else:
