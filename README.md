@@ -11,7 +11,7 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
 - **Asynchronous Flow**: Built fully on Python's `asyncio` standard library, leveraging `Telethon` for Telegram and `matrix-nio` for Matrix API communication without blocking I/O.
 - **Album / Group Support**: Automatically detects and batches group media/albums (grouped messages) to wait for complete reception before forwarding, preserving chronological ordering.
 - **Forum Topics / Subchannel Filtering**: Supports monitoring specific subtopics inside Telegram forums using a custom `channel_id:topic_id` configuration format.
-- **Case-Insensitive Username Support**: Accepts both public channel usernames (e.g. `Naked_tiktok2` or `@Naked_tiktok2`) and integer chat IDs, with fully case-insensitive lookup matching.
+- **Case-Insensitive Username Support**: Accepts both public channel usernames (e.g. `MyChannel` or `@MyChannel`) and integer chat IDs, with fully case-insensitive lookup matching.
 - **In-Memory Streaming**: Avoids writing files to disk; downloads and uploads media bytes directly through in-memory streams (`io.BytesIO`).
 - **Enhanced Client Compatibility**:
   - Populates standard `body`, `filename`, and `info.filename` metadata so both legacy and modern Matrix clients render the filename cleanly.
@@ -43,12 +43,12 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `MATRIX_HOMESERVER` | Your Matrix Homeserver URL | `https://matrix.org` |
 | `MATRIX_ACCESS_TOKEN` | Access token for the Matrix account | `syt_dW...` |
 | `MATRIX_ROOM_ID` | Internal room ID of the destination room | `!abcde12345:matrix.org` |
-| `TG_CHANNELS` | Comma-separated list of target channels and topic filters | `Naked_tiktok2, -1001234567890:42, @MyChannel` |
+| `TG_CHANNELS` | Comma-separated list of target channels and topic filters | `MyChannel, -1001234567890:42, @MyChannel` |
 | `MAX_MEDIA_SIZE_MB` | Maximum size in MB to download and bridge | `80` (Default: `50`) |
 
 ### Specifying Channels & Topics in `TG_CHANNELS`
 The `TG_CHANNELS` environment variable accepts a comma-separated list of several formats:
-- **Public Username**: `Naked_tiktok2` or `@Naked_tiktok2` (any casing; `@` is stripped automatically).
+- **Public Username**: `MyChannel` or `@MyChannel` (any casing; `@` is stripped automatically).
 - **Private Channel / Group ID**: `-1001234567890`.
 - **Forum Topic Filter**: `channel_id:topic_id` or `username:topic_id` (e.g. `-1001234567890:42`). This configures the bridge to only forward media posted inside that specific topic ID (subchannel thread) of the forum.
 
@@ -77,7 +77,7 @@ services:
       - MATRIX_HOMESERVER=https://matrix.org
       - MATRIX_ACCESS_TOKEN=your_matrix_access_token
       - MATRIX_ROOM_ID=!your_room_id:matrix.org
-      - TG_CHANNELS=Naked_tiktok2,MyOtherChannel
+      - TG_CHANNELS=MyChannel,MyOtherChannel
       - MAX_MEDIA_SIZE_MB=80
 ```
 
