@@ -7,7 +7,7 @@ services:
       - ./app:/app
       - ./session_data:/app/session
     working_dir: /app
-    command: sh -c "pip install --no-cache-dir telethon matrix-nio httpx && python bridge.py"
+    command: sh -c "pip install --no-cache-dir telethon matrix-nio && python bridge.py"
     environment:
       - TG_API_ID=
       - TG_API_HASH=
