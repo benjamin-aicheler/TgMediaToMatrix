@@ -211,9 +211,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
             except Exception as thumb_err:
                 logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
-        caption = message.message.strip() if message.message else ""
-        display_text = caption if caption else filename
-        body_text = f"[{channel_name}] {display_text}"
+        body_text = f"[{channel_name}] {filename}"
 
         matrix_content = {
             "msgtype": msg_type,
