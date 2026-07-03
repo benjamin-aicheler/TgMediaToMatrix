@@ -1,0 +1,18 @@
+services:
+  telegram-matrix-bridge:
+    image: python:3.11-slim
+    container_name: tg_matrix_media_bridge
+    restart: unless-stopped
+    volumes:
+      - ./app:/app
+      - ./session_data:/app/session
+    working_dir: /app
+    command: sh -c "pip install --no-cache-dir telethon matrix-nio httpx && python bridge.py"
+    environment:
+      - TG_API_ID=
+      - TG_API_HASH=
+      - MATRIX_HOMESERVER=
+      - MATRIX_ACCESS_TOKEN=
+      - MATRIX_ROOM_ID=
+      - TG_CHANNELS=
+      - MAX_MEDIA_SIZE_MB=80
