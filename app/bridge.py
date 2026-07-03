@@ -173,7 +173,8 @@ async def process_and_upload_media(message, source_chat, channel_name):
         # Populate base info object with the exact file size of downloaded bytes
         info_dict = {
             "size": len(media_bytes),
-            "mimetype": mime_type
+            "mimetype": mime_type,
+            "filename": filename
         }
 
         # Extract additional metadata from Telegram attributes
@@ -238,11 +239,15 @@ async def process_and_upload_media(message, source_chat, channel_name):
                 logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
         body_text = f"[{channel_name}] {filename}"
+        formatted_body_text = f"<strong>[{channel_name}]</strong> {filename}"
 
         matrix_content = {
             "msgtype": msg_type,
             "body": body_text,
-            "url": content_uri
+            "url": content_uri,
+            "filename": filename,
+            "format": "org.matrix.custom.html",
+            "formatted_body": formatted_body_text
         }
         if info_dict:
             matrix_content["info"] = info_dict
