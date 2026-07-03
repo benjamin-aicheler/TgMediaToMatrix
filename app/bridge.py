@@ -204,10 +204,36 @@ async def process_and_upload_media(message, source_chat, channel_name):
                     )
                     if isinstance(thumb_resp, UploadResponse):
                         info_dict["thumbnail_url"] = thumb_resp.content_uri
-                        info_dict["thumbnail_info"] = {
+                        
+                        # Extract exact width and height of the thumbnail if available
+                        thumb_w, thumb_h = None, None
+                        try:
+                            if msg_type == "m.image" and message.photo and message.photo.sizes:
+                                # thumb_idx = 0 represents the first (smallest) size
+                                if len(message.photo.sizes) > 0:
+                                    t_obj = message.photo.sizes[0]
+                                    if hasattr(t_obj, 'w') and t_obj.w is not None and hasattr(t_obj, 'h') and t_obj.h is not None:
+                                        thumb_w = int(t_obj.w)
+                                        thumb_h = int(t_obj.h)
+                            elif msg_type == "m.video" and message.document and message.document.thumbs:
+                                # thumb_idx = -1 represents the last (largest) thumbnail size
+                                if len(message.document.thumbs) > 0:
+                                    t_obj = message.document.thumbs[-1]
+                                    if hasattr(t_obj, 'w') and t_obj.w is not None and hasattr(t_obj, 'h') and t_obj.h is not None:
+                                        thumb_w = int(t_obj.w)
+                                        thumb_h = int(t_obj.h)
+                        except Exception as size_err:
+                            logging.debug(f"[{source_chat}] Failed to parse thumbnail dimensions: {size_err}")
+
+                        thumb_info = {
                             "mimetype": "image/jpeg",
                             "size": len(thumb_bytes)
                         }
+                        if thumb_w is not None and thumb_h is not None:
+                            thumb_info["w"] = thumb_w
+                            thumb_info["h"] = thumb_h
+
+                        info_dict["thumbnail_info"] = thumb_info
             except Exception as thumb_err:
                 logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
