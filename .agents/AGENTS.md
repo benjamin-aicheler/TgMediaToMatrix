@@ -35,3 +35,20 @@ This file contains development rules and architectural guidelines for AI agents 
 
 - Implement consistent and context-aware logging. Always prefix log entries with the source chat username or ID (e.g. `[{source_chat}]`).
 - Handle errors in media download and upload gracefully. If an individual file in an album fails to download or upload, log it clearly but do not allow it to crash the process or prevent other media items in the album from being processed.
+
+---
+
+## 4. Content Moderation & Media Processing
+
+### In-Memory Operations
+- Video frame extraction (for content safety moderation) must be done entirely in-memory (e.g. using `av` and `PIL`). Never write extracted frames or intermediate video clips to disk.
+
+### Fail-Closed Design
+- When content moderation is configured/enabled, any processing error, frame extraction failure, or external API communication failure MUST result in a fail-closed response (i.e., block the media from being forwarded). Unmoderated content must never be allowed to pass.
+
+### Filter Adherence
+- Fully respect user-configured safety categories in `LLAMAGUARD_CHECKS`. If the content is classified as unsafe but none of the violated categories overlap with the user's configured important checks, the media must be permitted to pass.
+
+### Dependency Isolation
+- Isolate the imports of optional binary/C-bound packages (like `av` and `PIL`) inside the functions that use them, catching `ImportError` gracefully, to keep the main service core runnable even if those specific packages are not present.
+

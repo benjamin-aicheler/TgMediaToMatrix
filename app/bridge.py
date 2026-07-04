@@ -38,6 +38,18 @@ try:
     ENABLE_IMAGES = get_env_bool("ENABLE_IMAGES", True)
     ENABLE_VIDEOS = get_env_bool("ENABLE_VIDEOS", True)
 
+    LLAMAGUARD_API_URL = os.environ.get("LLAMAGUARD_API_URL", "").strip() or None
+    LLAMAGUARD_MODEL_NAME = os.environ.get("LLAMAGUARD_MODEL_NAME", "meta-llama/llama-guard-4-12b").strip()
+    LLAMAGUARD_API_KEY = os.environ.get("LLAMAGUARD_API_KEY", "").strip() or None
+
+    LLAMAGUARD_CHECKS = set()
+    checks_raw = os.environ.get("LLAMAGUARD_CHECKS", "")
+    if checks_raw:
+        for check in checks_raw.split(','):
+            check = check.strip()
+            if check:
+                LLAMAGUARD_CHECKS.add(check.upper())
+
     # Extract channels, ignoring empty elements, supporting channel_id:topic_id formats
     TG_CHANNELS_RAW = get_env_or_raise("TG_CHANNELS")
     TG_CHANNELS = []
@@ -117,6 +129,172 @@ async def get_topic_name(client, chat_entity, topic_id):
         
     return f"Topic {topic_id}"
 
+
+def extract_video_frame(video_bytes: bytes) -> bytes:
+    """Extracts the middle frame of the video as JPEG bytes in-memory"""
+    try:
+        import av
+        from PIL import Image
+        import io
+    except ImportError:
+        logging.error("PygAV (av) or Pillow (PIL) package is missing! Please install them to enable video frame safety moderation.")
+        return None
+
+    try:
+        container = av.open(io.BytesIO(video_bytes))
+        video_stream = container.streams.video[0]
+        
+        # Get total duration or frame count to pick the middle frame
+        total_frames = video_stream.frames
+        target_frame_idx = total_frames // 2 if total_frames and total_frames > 1 else 0
+        
+        frame_count = 0
+        for frame in container.decode(video=0):
+            if frame_count >= target_frame_idx:
+                img = frame.to_image()
+                img_bytes_io = io.BytesIO()
+                img.save(img_bytes_io, format="JPEG")
+                return img_bytes_io.getvalue()
+            frame_count += 1
+            
+        # Fallback to the first frame
+        container.seek(0)
+        for frame in container.decode(video=0):
+            img = frame.to_image()
+            img_bytes_io = io.BytesIO()
+            img.save(img_bytes_io, format="JPEG")
+            return img_bytes_io.getvalue()
+            
+    except Exception as e:
+        logging.error(f"Failed to extract frame from video: {e}")
+    return None
+
+
+async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: str, filename: str) -> bool:
+    """
+    Checks the safety of the media using Meta Llama Guard via an OpenAI-compatible Vision API.
+    Returns True if the media is safe, False if it is unsafe or if the check fails.
+    """
+    if not LLAMAGUARD_API_URL:
+        return True # Disabled, pass by default
+
+    image_bytes = None
+    if mime_type.startswith("image/"):
+        image_bytes = media_bytes
+    elif mime_type.startswith("video/"):
+        logging.info(f"[{source_chat}] Extracting frame from video {filename} for Llama Guard safety check...")
+        image_bytes = await asyncio.to_thread(extract_video_frame, media_bytes)
+        if not image_bytes:
+            logging.error(f"[{source_chat}] Could not extract video frame for safety check. Blocking media due to check failure.")
+            return False
+
+    if not image_bytes:
+        logging.error(f"[{source_chat}] No image bytes available for safety check. Blocking media due to check failure.")
+        return False
+
+    logging.info(f"[{source_chat}] Calling Llama Guard API ({LLAMAGUARD_MODEL_NAME}) for safety classification of {filename}...")
+    
+    try:
+        # Encode image to base64
+        import base64
+        import urllib.request
+        import json
+
+        b64_data = base64.b64encode(image_bytes).decode('utf-8')
+        image_url = f"data:image/jpeg;base64,{b64_data}"
+        
+        # Prepare OpenAI-compatible vision payload
+        payload = {
+            "model": LLAMAGUARD_MODEL_NAME,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Analyze the safety of this content under your classification guidelines."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url
+                            }
+                        }
+                    ]
+                }
+            ],
+            "temperature": 0.0
+        }
+        
+        headers = {
+            "Content-Type": "application/json"
+        }
+        if LLAMAGUARD_API_KEY:
+            headers["Authorization"] = f"Bearer {LLAMAGUARD_API_KEY}"
+            
+        req = urllib.request.Request(
+            url=f"{LLAMAGUARD_API_URL.rstrip('/')}/chat/completions",
+            data=json.dumps(payload).encode('utf-8'),
+            headers=headers,
+            method="POST"
+        )
+        
+        def do_request():
+            with urllib.request.urlopen(req, timeout=30) as response:
+                return response.read()
+                
+        response_bytes = await asyncio.to_thread(do_request)
+        resp_json = json.loads(response_bytes.decode('utf-8'))
+        
+        if "choices" not in resp_json or not resp_json["choices"]:
+            logging.error(f"[{source_chat}] Unexpected Llama Guard API response structure: {resp_json}. Blocking media due to check failure.")
+            return False
+            
+        response_text = resp_json["choices"][0]["message"]["content"].strip()
+        logging.info(f"[{source_chat}] Llama Guard classification result: {response_text}")
+        
+        lines = response_text.split()
+        if not lines:
+            logging.error(f"[{source_chat}] Llama Guard returned empty response. Blocking media due to check failure.")
+            return False
+            
+        status = lines[0].lower()
+        if status == "unsafe":
+            # Extract violated categories
+            violated = []
+            for line in lines[1:]:
+                for word in line.replace(',', ' ').split():
+                    word_clean = word.strip().upper()
+                    if word_clean.startswith('S') and word_clean[1:].isdigit():
+                        violated.append(word_clean)
+            
+            if not violated:
+                violated = ["UNSPECIFIED"]
+                
+            # Filter based on user-configured Sxx checks
+            if LLAMAGUARD_CHECKS:
+                overlap = [c for c in violated if c in LLAMAGUARD_CHECKS]
+                if overlap:
+                    logging.warning(f"[{source_chat}] BLOCKING media {filename}! Violates configured Llama Guard categories: {overlap}")
+                    return False
+                else:
+                    logging.info(f"[{source_chat}] Media {filename} classified as unsafe ({violated}), but none are in configured important checks ({LLAMAGUARD_CHECKS}). Passing.")
+                    return True
+            else:
+                logging.warning(f"[{source_chat}] BLOCKING media {filename}! Violates Llama Guard categories: {violated}")
+                return False
+                
+        elif status == "safe":
+            return True
+        else:
+            logging.error(f"[{source_chat}] Llama Guard returned unexpected status '{status}'. Blocking media due to check failure.")
+            return False
+        
+    except Exception as e:
+        logging.error(f"[{source_chat}] Error during Llama Guard safety check: {e}. Blocking media due to check failure.")
+        return False
+
+
 tg_client = TelegramClient(
     'session/tgmabr', 
     TG_API_ID, 
@@ -170,7 +348,15 @@ async def process_and_upload_media(message, source_chat, channel_name):
         logging.error(f"[{source_chat}] Critical error during Telegram download: {e}")
         return
 
-    logging.info(f"[{source_chat}] Download complete ({len(media_bytes)} bytes). Uploading to Matrix homeserver...")
+    logging.info(f"[{source_chat}] Download complete ({len(media_bytes)} bytes).")
+
+    # Llama Guard Safety Check
+    if LLAMAGUARD_API_URL:
+        is_safe = await check_media_safety(media_bytes, mime_type, source_chat, filename)
+        if not is_safe:
+            return
+
+    logging.info(f"[{source_chat}] Uploading to Matrix homeserver...")
     
     try:
         # Upload main media using matrix-nio's built-in client method
@@ -387,6 +573,10 @@ async def main():
     logging.info(f"Configured media limit: {MAX_MEDIA_SIZE_MB} MB")
     logging.info(f"Images enabled: {ENABLE_IMAGES}")
     logging.info(f"Videos enabled: {ENABLE_VIDEOS}")
+    logging.info(f"Llama Guard Moderation: {'Enabled' if LLAMAGUARD_API_URL else 'Disabled'}")
+    if LLAMAGUARD_API_URL:
+        logging.info(f"Llama Guard Model: {LLAMAGUARD_MODEL_NAME}")
+        logging.info(f"Llama Guard Checks Filter: {list(LLAMAGUARD_CHECKS) if LLAMAGUARD_CHECKS else 'ALL categories'}")
     try:
         await tg_client.run_until_disconnected()
     finally:

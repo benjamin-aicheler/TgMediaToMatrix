@@ -7,7 +7,7 @@ services:
       - ./app:/app
       - ./session_data:/app/session
     working_dir: /app
-    command: sh -c "pip install --no-cache-dir telethon matrix-nio && python bridge.py"
+    command: sh -c "pip install --no-cache-dir telethon matrix-nio av Pillow && python bridge.py"
     environment:
       - TG_API_ID=
       - TG_API_HASH=
@@ -18,3 +18,8 @@ services:
       - MAX_MEDIA_SIZE_MB=80
       - ENABLE_IMAGES=true
       - ENABLE_VIDEOS=true
+      - LLAMAGUARD_API_URL=
+      - LLAMAGUARD_MODEL_NAME=meta-llama/llama-guard-4-12b
+      - LLAMAGUARD_API_KEY=
+      - LLAMAGUARD_CHECKS=
+

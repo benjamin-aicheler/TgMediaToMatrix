@@ -47,12 +47,59 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `MAX_MEDIA_SIZE_MB` | Maximum size in MB to download and bridge | `80` (Default: `50`) |
 | `ENABLE_IMAGES` | Set to `false` to disable bridging of images | `true` (Default: `true`) |
 | `ENABLE_VIDEOS` | Set to `false` to disable bridging of videos | `true` (Default: `true`) |
+| `LLAMAGUARD_API_URL` | Base URL of an OpenAI-compatible Vision API for Llama Guard checks | `http://192.168.1.100:8000/v1` (Default: `None`/Disabled) |
+| `LLAMAGUARD_MODEL_NAME` | Model name to request for safety moderation | `meta-llama/llama-guard-4-12b` |
+| `LLAMAGUARD_API_KEY` | API authentication key for Llama Guard endpoint if required | `your-api-key` (Default: `None`) |
+| `LLAMAGUARD_CHECKS` | Comma-separated list of safety categories to block. If empty, blocks on any safety violation. | `S1,S2,S3,S4` (Default: empty / block on any) |
 
 ### Specifying Channels & Topics in `TG_CHANNELS`
 The `TG_CHANNELS` environment variable accepts a comma-separated list of several formats:
 - **Public Username**: `MyChannel` or `@MyChannel` (any casing; `@` is stripped automatically).
 - **Private Channel / Group ID**: `-1001234567890`.
 - **Forum Topic Filter**: `channel_id:topic_id` or `username:topic_id` (e.g. `-1001234567890:42`). This configures the bridge to only forward media posted inside that specific topic ID (subchannel thread) of the forum.
+
+---
+
+## Content Moderation with Meta Llama Guard 4 12B
+
+The bridge supports real-time, automated image and video content moderation using Meta Llama Guard 4 12B (or any OpenAI-compatible API endpoint hosting a compatible model).
+
+### How it Works
+1. **In-Memory Frame Extraction**: When a video is downloaded, the bridge extracts its middle frame in-memory as JPEG bytes using `PyAV` (`av`) and `Pillow` (`PIL`). No media files are ever written to disk.
+2. **OpenAI-Compatible Vision API**: The bridge encodes the image (or extracted video frame) into base64 and forwards it to the specified OpenAI-compatible `/chat/completions` vision endpoint.
+3. **Classification and Categories**: Llama Guard typically outputs safety ratings (e.g., `safe` or `unsafe` followed by the violated categories like `S1`, `S2`, etc.).
+4. **Fail-Closed Design**: If the Llama Guard endpoint is unreachable, is misconfigured, or lacks the necessary library bindings (`av` or `Pillow`), the bridge logs the error and blocks the media from being forwarded. This ensures that no unchecked or unmoderated media passes through when content moderation is enabled.
+
+### Configuring Safety Checks
+The `LLAMAGUARD_CHECKS` environment variable allows you to configure which specific `Sxx` guidelines are strictly enforced:
+- **Block All Violations (Default)**: If `LLAMAGUARD_CHECKS` is left empty or omitted, *any* safety violation returned by Llama Guard will block the media from being forwarded.
+- **Selective Enforcement**: If you only care about specific categories, list them in a comma-separated format (e.g., `S1,S2,S3`). If Llama Guard flags media with an `S5` violation but your config only lists `S1,S2,S3`, the bridge will log the safety warning but still forward the media.
+
+### Available Safety Categories
+
+Below is the standard taxonomy of categories defined by the Meta Llama Guard 3 & 4 models that you can selectively filter:
+
+| Category | Name | Description |
+| :--- | :--- | :--- |
+| `S1` | Violent Crimes | Content that encourages, depicts, or facilitates violent acts, including physical violence, murder, assault, kidnapping, or robbery. |
+| `S2` | Non-Violent Crimes | Content that encourages, depicts, or facilitates non-violent crimes, such as theft, burglary, fraud, drug distribution, smuggling, or vandalism. |
+| `S3` | Sex-Related Crimes | Content depicting or promoting sexual assault, sexual violence, sexual exploitation, or human trafficking. |
+| `S4` | Child Sexual Exploitation | Content promoting or depicting child sexual abuse material (CSAM), grooming, sexual exploitation, or abuse of minors. |
+| `S5` | Defamation | Content containing false statements of fact targeted at harming the reputation of individuals or organizations. |
+| `S6` | Cyberattacks | Content depicting, encouraging, or offering instructions for cyberattacks, hacking, phishing, creating malware, or launching DDoS campaigns. |
+| `S7` | Cyberattacks and Critical Infrastructure | Content promoting or describing cyberattacks targeting utility grids, transportation systems, water supplies, or public critical infrastructure. |
+| `S8` | Weapons of Mass Destruction | Content depicting, instructing, or facilitating the manufacturing, acquisition, or deployment of nuclear, chemical, biological, or radiological weapons. |
+| `S9` | Sexually Explicit Content | Content depicting sexually explicit material, pornography, nudity, or explicit sexual acts. |
+| `S10` | Harassment | Content designed to harass, stalk, bully, intimidate, or abuse a specific individual. |
+| `S11` | Privacy Violations | Content that shares personally identifiable information (PII) without consent (doxxing), such as addresses, phone numbers, SSNs, or credit cards. |
+| `S12` | Non-Consensual Sexual Content (NCSC) | Content containing non-consensual sexual depictions, such as revenge pornography or sexually explicit deepfakes. |
+| `S13` | Violent Extremism | Content depicting, promoting, or recruiting for terrorist acts, violent extremist groups, or sharing extremist propaganda. |
+| `S14` | Specialized Advice | Content offering unlicensed, dangerous, or illegal advice in highly regulated professional fields (e.g., medical, financial, or legal advice). |
+
+> [!NOTE]
+> Ensure that you verify the specific category codes (S1 to S14) supported by your self-hosted Llama Guard deployment or downstream API provider, as taxonomies can slightly vary between model sub-versions.
+
+
 
 ---
 
@@ -72,7 +119,7 @@ services:
       - ./app:/app
       - ./session_data:/app/session
     working_dir: /app
-    command: sh -c "pip install --no-cache-dir telethon matrix-nio && python bridge.py"
+    command: sh -c "pip install --no-cache-dir telethon matrix-nio av Pillow && python bridge.py"
     environment:
       - TG_API_ID=your_tg_api_id
       - TG_API_HASH=your_tg_api_hash
@@ -83,6 +130,11 @@ services:
       - MAX_MEDIA_SIZE_MB=80
       - ENABLE_IMAGES=true
       - ENABLE_VIDEOS=true
+      - LLAMAGUARD_API_URL=
+      - LLAMAGUARD_MODEL_NAME=meta-llama/llama-guard-4-12b
+      - LLAMAGUARD_API_KEY=
+      - LLAMAGUARD_CHECKS=
+
 ```
 
 ### 2. First-Run Session Authentication
