@@ -56,6 +56,7 @@ try:
     TG_TOPIC_FILTERS = {}  # maps base_chat_id -> set of topic_ids (ints)
     TG_UNFILTERED_CHANNELS = set()  # tracks channels configured to allow all topics
 
+    import re
     for item in TG_CHANNELS_RAW.split(","):
         item = item.strip()
         if not item:
@@ -68,7 +69,10 @@ try:
             if chan_part.replace('-', '').isdigit():
                 chan_id = int(chan_part)
             else:
-                chan_id = chan_part.lstrip('@').lower()
+                chan_username = chan_part.lstrip('@')
+                if not re.match(r'^[a-zA-Z0-9_]+$', chan_username):
+                    raise ValueError(f"Invalid Telegram channel username '{chan_part}' in '{item}'. Must contain only letters, numbers, and underscores.")
+                chan_id = chan_username.lower()
 
             if topic_part.isdigit():
                 topic_id = int(topic_part)
@@ -83,7 +87,10 @@ try:
             if item.replace('-', '').isdigit():
                 chan_id = int(item)
             else:
-                chan_id = item.lstrip('@').lower()
+                chan_username = item.lstrip('@')
+                if not re.match(r'^[a-zA-Z0-9_]+$', chan_username):
+                    raise ValueError(f"Invalid Telegram channel username '{item}'. Must contain only letters, numbers, and underscores.")
+                chan_id = chan_username.lower()
             TG_CHANNELS.append(chan_id)
             TG_UNFILTERED_CHANNELS.add(chan_id)
 
