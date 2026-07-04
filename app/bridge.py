@@ -232,8 +232,12 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
         if LLAMAGUARD_API_KEY:
             headers["Authorization"] = f"Bearer {LLAMAGUARD_API_KEY}"
             
+        api_url_base = LLAMAGUARD_API_URL.rstrip('/')
+        if api_url_base.endswith('/chat/completions'):
+            api_url_base = api_url_base[:-17].rstrip('/')
+
         req = urllib.request.Request(
-            url=f"{LLAMAGUARD_API_URL.rstrip('/')}/chat/completions",
+            url=f"{api_url_base}/chat/completions",
             data=json.dumps(payload).encode('utf-8'),
             headers=headers,
             method="POST"
