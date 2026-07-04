@@ -89,15 +89,15 @@ Below is the standard taxonomy of categories defined by the Meta Llama Guard 3 &
 | `S3` | Sex-Related Crimes | Content depicting or promoting sexual assault, sexual violence, sexual exploitation, or human trafficking. |
 | `S4` | Child Sexual Exploitation | Content promoting or depicting child sexual abuse material (CSAM), grooming, sexual exploitation, or abuse of minors. |
 | `S5` | Defamation | Content containing false statements of fact targeted at harming the reputation of individuals or organizations. |
-| `S6` | Cyberattacks | Content depicting, encouraging, or offering instructions for cyberattacks, hacking, phishing, creating malware, or launching DDoS campaigns. |
-| `S7` | Cyberattacks and Critical Infrastructure | Content promoting or describing cyberattacks targeting utility grids, transportation systems, water supplies, or public critical infrastructure. |
-| `S8` | Weapons of Mass Destruction | Content depicting, instructing, or facilitating the manufacturing, acquisition, or deployment of nuclear, chemical, biological, or radiological weapons. |
-| `S9` | Sexually Explicit Content | Content depicting sexually explicit material, pornography, nudity, or explicit sexual acts. |
-| `S10` | Harassment | Content designed to harass, stalk, bully, intimidate, or abuse a specific individual. |
-| `S11` | Privacy Violations | Content that shares personally identifiable information (PII) without consent (doxxing), such as addresses, phone numbers, SSNs, or credit cards. |
-| `S12` | Non-Consensual Sexual Content (NCSC) | Content containing non-consensual sexual depictions, such as revenge pornography or sexually explicit deepfakes. |
-| `S13` | Violent Extremism | Content depicting, promoting, or recruiting for terrorist acts, violent extremist groups, or sharing extremist propaganda. |
-| `S14` | Specialized Advice | Content offering unlicensed, dangerous, or illegal advice in highly regulated professional fields (e.g., medical, financial, or legal advice). |
+| `S6` | Specialized Advice | Content offering unlicensed, dangerous, or illegal advice in highly regulated professional fields (e.g., medical, financial, or legal advice). |
+| `S7` | Privacy | Content that shares personally identifiable information (PII) without consent (doxxing), such as addresses, phone numbers, or private documents. |
+| `S8` | Intellectual Property | Content that promotes or facilitates copyright, trademark, or patent infringement. |
+| `S9` | Indiscriminate Weapons | Content promoting or describing the creation, acquisition, or deployment of chemical, biological, nuclear, or other weapons of mass destruction. |
+| `S10` | Hate | Content promoting hatred, discrimination, disparagement, or violence against individuals or groups based on protected characteristics. |
+| `S11` | Suicide & Self-Harm | Content depicting, encouraging, or instructing individuals to commit suicide or engage in self-harm. |
+| `S12` | Sexual Content | Content depicting sexually explicit material, pornography, nudity, or explicit sexual acts. |
+| `S13` | Elections | Content that aims to interfere with election processes, spread voter suppression, or promote fraudulent voter registration. |
+| `S14` | Code Interpreter Abuse | Content attempting to exploit, breach, or abuse runtime execution or code interpreter sandboxes. |
 
 > [!NOTE]
 > Ensure that you verify the specific category codes (S1 to S14) supported by your self-hosted Llama Guard deployment or downstream API provider, as taxonomies can slightly vary between model sub-versions.
