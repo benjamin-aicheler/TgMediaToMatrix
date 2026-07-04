@@ -59,6 +59,14 @@ try:
             if check:
                 LLAMAGUARD_CHECKS.add(check.upper())
 
+    LLAMAGUARD_REQUIRE_CHECKS = set()
+    req_checks_raw = os.environ.get("LLAMAGUARD_REQUIRE_CHECKS", "")
+    if req_checks_raw:
+        for check in req_checks_raw.split(','):
+            check = check.strip()
+            if check:
+                LLAMAGUARD_REQUIRE_CHECKS.add(check.upper())
+
     # Extract channels, ignoring empty elements, supporting channel_id:topic_id formats
     TG_CHANNELS_RAW = get_env_or_raise("TG_CHANNELS")
     TG_CHANNELS = []
@@ -343,20 +351,39 @@ Provide your safety assessment for ONLY THE LAST User in the above conversation:
             if not violated:
                 violated = ["UNSPECIFIED"]
                 
-            # Filter based on user-configured Sxx checks
+            # 1. Block-list check (LLAMAGUARD_CHECKS)
+            # If any violated category is in LLAMAGUARD_CHECKS, we block immediately.
             if LLAMAGUARD_CHECKS:
                 overlap = [c for c in violated if c in LLAMAGUARD_CHECKS]
                 if overlap:
                     logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates configured Llama Guard categories: {overlap}")
                     return False
+
+            # 2. Required-list check (LLAMAGUARD_REQUIRE_CHECKS)
+            # If LLAMAGUARD_REQUIRE_CHECKS is specified, the content MUST violate at least one of them.
+            if LLAMAGUARD_REQUIRE_CHECKS:
+                required_overlap = [c for c in violated if c in LLAMAGUARD_REQUIRE_CHECKS]
+                if not required_overlap:
+                    logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as unsafe ({violated}), but does not match any required categories: {LLAMAGUARD_REQUIRE_CHECKS}")
+                    return False
                 else:
-                    logging.info(f"[{source_chat}]{label_prefix} Media classified as unsafe ({violated}), but none are in configured important checks ({LLAMAGUARD_CHECKS}). Passing.")
+                    logging.info(f"[{source_chat}]{label_prefix} Media matches required safety check: {required_overlap}. Passing.")
                     return True
+
+            # 3. Default behavior if no required-list and no block-list overlap
+            if LLAMAGUARD_CHECKS:
+                logging.info(f"[{source_chat}]{label_prefix} Media classified as unsafe ({violated}), but none are in configured important checks ({LLAMAGUARD_CHECKS}). Passing.")
+                return True
             else:
+                # If LLAMAGUARD_CHECKS is empty and no required-list is configured, we block any unsafe classification by default.
                 logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates Llama Guard categories: {violated}")
                 return False
                 
         elif status == "safe":
+            # If we require certain unsafe categories, safe content is NOT allowed!
+            if LLAMAGUARD_REQUIRE_CHECKS:
+                logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as safe, but does not match any required unsafe categories: {LLAMAGUARD_REQUIRE_CHECKS}")
+                return False
             return True
         else:
             logging.error(f"[{source_chat}]{label_prefix} Llama Guard returned unexpected status '{status}'. Blocking due to check failure.")

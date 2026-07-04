@@ -51,6 +51,7 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `LLAMAGUARD_MODEL_NAME` | Model name to request for safety moderation | `meta-llama/llama-guard-4-12b` |
 | `LLAMAGUARD_API_KEY` | API authentication key for Llama Guard endpoint if required | `your-api-key` (Default: `None`) |
 | `LLAMAGUARD_CHECKS` | Comma-separated list of safety categories to block. If empty, blocks on any safety violation. | `S1,S2,S3,S4` (Default: empty / block on any) |
+| `LLAMAGUARD_REQUIRE_CHECKS` | Comma-separated list of required safety categories (whitelist mode). If set, safe content and any content not matching these categories is blocked. | `S12` (Default: empty / disable whitelist mode) |
 | `LLAMAGUARD_VIDEO_FRAMES` | Number of frames to extract and check concurrently from each video | `5` (Default: `5`) |
 | `LLAMAGUARD_RANDOM_FRAMES` | Extract frames randomly throughout the video duration instead of evenly spaced. Set to `false` for evenly spaced selection. | `true` (Default: `true`) |
 
@@ -77,6 +78,17 @@ The bridge supports real-time, automated image and video content moderation usin
 The `LLAMAGUARD_CHECKS` environment variable allows you to configure which specific `Sxx` guidelines are strictly enforced:
 - **Block All Violations (Default)**: If `LLAMAGUARD_CHECKS` is left empty or omitted, *any* safety violation returned by Llama Guard will block the media from being forwarded.
 - **Selective Enforcement**: If you only care about specific categories, list them in a comma-separated format (e.g., `S1,S2,S3`). If Llama Guard flags media with an `S5` violation but your config only lists `S1,S2,S3`, the bridge will log the safety warning but still forward the media.
+
+### Whitelist Mode (Required Categories)
+If you want to *only* forward media that falls under a specific safety category (e.g. you are bridging an adult/sexual content channel and want to block generic safe content, while strictly filtering out illegal categories like Child Exploitation `S4`), you can use `LLAMAGUARD_REQUIRE_CHECKS`:
+- **`LLAMAGUARD_REQUIRE_CHECKS`**: Set this to the categories that media *must* be classified under to be forwarded. If configured, any completely `safe` content or content violating other unlisted categories is blocked.
+- **Co-existing with Block List**: You can combine this with `LLAMAGUARD_CHECKS`. If an item matches a required category (like `S12` Sexual Content) but *also* contains a blocked category (like `S4` Child Exploitation), it will be strictly **blocked**.
+
+**Example**: Allow only Adult Content (`S12`), but strictly block Child Exploitation (`S4`) and normal safe content:
+```yaml
+LLAMAGUARD_REQUIRE_CHECKS: "S12"
+LLAMAGUARD_CHECKS: "S4"
+```
 
 ### Available Safety Categories
 
