@@ -19,6 +19,12 @@ def get_env_or_raise(key: str) -> str:
         raise ValueError(f"Required environment variable '{key}' is missing or empty.")
     return val.strip()
 
+def get_env_bool(key: str, default: bool) -> bool:
+    val = os.environ.get(key)
+    if val is None:
+        return default
+    return val.strip().lower() in ("true", "1", "yes", "on")
+
 try:
     TG_API_ID = int(get_env_or_raise("TG_API_ID"))
     TG_API_HASH = get_env_or_raise("TG_API_HASH")
@@ -28,6 +34,9 @@ try:
 
     MAX_MEDIA_SIZE_MB = int(os.environ.get("MAX_MEDIA_SIZE_MB", 50))
     MAX_MEDIA_SIZE_BYTES = MAX_MEDIA_SIZE_MB * 1024 * 1024
+
+    ENABLE_IMAGES = get_env_bool("ENABLE_IMAGES", True)
+    ENABLE_VIDEOS = get_env_bool("ENABLE_VIDEOS", True)
 
     # Extract channels, ignoring empty elements, supporting channel_id:topic_id formats
     TG_CHANNELS_RAW = get_env_or_raise("TG_CHANNELS")
@@ -132,7 +141,18 @@ async def process_and_upload_media(message, source_chat, channel_name):
     elif not mime_type:
         return
 
-    if not (mime_type.startswith("image/") or mime_type.startswith("video/")):
+    is_image = mime_type.startswith("image/")
+    is_video = mime_type.startswith("video/")
+
+    if not (is_image or is_video):
+        return
+
+    if is_image and not ENABLE_IMAGES:
+        logging.info(f"[{source_chat}] Skipping image media because ENABLE_IMAGES is false.")
+        return
+
+    if is_video and not ENABLE_VIDEOS:
+        logging.info(f"[{source_chat}] Skipping video media because ENABLE_VIDEOS is false.")
         return
 
     if not filename:
@@ -365,6 +385,8 @@ async def main():
     await tg_client.start()
     logging.info(f"Bridge successfully started and active for channels: {TG_CHANNELS}")
     logging.info(f"Configured media limit: {MAX_MEDIA_SIZE_MB} MB")
+    logging.info(f"Images enabled: {ENABLE_IMAGES}")
+    logging.info(f"Videos enabled: {ENABLE_VIDEOS}")
     try:
         await tg_client.run_until_disconnected()
     finally:

@@ -45,6 +45,8 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `MATRIX_ROOM_ID` | Internal room ID of the destination room | `!abcde12345:matrix.org` |
 | `TG_CHANNELS` | Comma-separated list of target channels and topic filters | `MyChannel, -1001234567890:42, @MyChannel` |
 | `MAX_MEDIA_SIZE_MB` | Maximum size in MB to download and bridge | `80` (Default: `50`) |
+| `ENABLE_IMAGES` | Set to `false` to disable bridging of images | `true` (Default: `true`) |
+| `ENABLE_VIDEOS` | Set to `false` to disable bridging of videos | `true` (Default: `true`) |
 
 ### Specifying Channels & Topics in `TG_CHANNELS`
 The `TG_CHANNELS` environment variable accepts a comma-separated list of several formats:
@@ -79,6 +81,8 @@ services:
       - MATRIX_ROOM_ID=!your_room_id:matrix.org
       - TG_CHANNELS=MyChannel,MyOtherChannel
       - MAX_MEDIA_SIZE_MB=80
+      - ENABLE_IMAGES=true
+      - ENABLE_VIDEOS=true
 ```
 
 ### 2. First-Run Session Authentication

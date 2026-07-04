@@ -16,3 +16,5 @@ services:
       - MATRIX_ROOM_ID=
       - TG_CHANNELS=
       - MAX_MEDIA_SIZE_MB=80
+      - ENABLE_IMAGES=true
+      - ENABLE_VIDEOS=true
