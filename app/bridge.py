@@ -234,16 +234,17 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
     return frames_bytes
 
 
-async def check_single_image_safety(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> bool:
+async def get_image_safety_classification(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> tuple[bool | None, list[str]]:
     """
-    Checks the safety of a single image/frame against the Llama Guard API.
-    Returns True if safe (or if filtering is disabled), False if unsafe/fails.
+    Calls Llama Guard API for a single image/frame.
+    Returns (is_safe, violated_categories) where:
+    - is_safe is True if 'safe', False if 'unsafe', or None if there was an error.
+    - violated_categories is a list of violated Sxx categories.
     """
     label_prefix = f" [{index_label}]" if index_label else ""
     logging.info(f"[{source_chat}]{label_prefix} Calling Llama Guard API ({LLAMAGUARD_MODEL_NAME}) for safety classification of {filename}...")
     
     try:
-        # Encode image to base64
         import base64
         import urllib.request
         import json
@@ -251,8 +252,6 @@ async def check_single_image_safety(image_bytes: bytes, source_chat: str, filena
         b64_data = base64.b64encode(image_bytes).decode('utf-8')
         image_url = f"data:image/jpeg;base64,{b64_data}"
         
-        # Prepare official Llama Guard taxonomy and prompt format to ensure optimal classification accuracy.
-        # This matches the training format Llama Guard expects for vision safety classification tasks.
         prompt_text = """Task: Check if there is unsafe content in 'User' messages in conversations according to our safety policy with the below categories.
 
 <BEGIN UNSAFE CONTENT CATEGORIES>
@@ -327,16 +326,16 @@ Provide your safety assessment for ONLY THE LAST User in the above conversation:
         resp_json = json.loads(response_bytes.decode('utf-8'))
         
         if "choices" not in resp_json or not resp_json["choices"]:
-            logging.error(f"[{source_chat}]{label_prefix} Unexpected Llama Guard API response structure: {resp_json}. Blocking due to check failure.")
-            return False
+            logging.error(f"[{source_chat}]{label_prefix} Unexpected Llama Guard API response structure: {resp_json}")
+            return None, []
             
         response_text = resp_json["choices"][0]["message"]["content"].strip()
         logging.info(f"[{source_chat}]{label_prefix} Llama Guard classification result: {response_text}")
         
         lines = response_text.split()
         if not lines:
-            logging.error(f"[{source_chat}]{label_prefix} Llama Guard returned empty response. Blocking due to check failure.")
-            return False
+            logging.error(f"[{source_chat}]{label_prefix} Llama Guard returned empty response.")
+            return None, []
             
         status = lines[0].lower()
         if status == "unsafe":
@@ -347,57 +346,68 @@ Provide your safety assessment for ONLY THE LAST User in the above conversation:
                     word_clean = word.strip().upper()
                     if word_clean.startswith('S') and word_clean[1:].isdigit():
                         violated.append(word_clean)
-            
             if not violated:
                 violated = ["UNSPECIFIED"]
-                
-            # 1. Block-list check (LLAMAGUARD_CHECKS)
-            # If any violated category is in LLAMAGUARD_CHECKS, we block immediately.
-            if LLAMAGUARD_CHECKS:
-                overlap = [c for c in violated if c in LLAMAGUARD_CHECKS]
-                if overlap:
-                    logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates configured Llama Guard categories: {overlap}")
-                    return False
-
-            # 2. Required-list check (LLAMAGUARD_REQUIRE_CHECKS)
-            # If LLAMAGUARD_REQUIRE_CHECKS is specified, the content MUST violate at least one of them.
-            if LLAMAGUARD_REQUIRE_CHECKS:
-                required_overlap = [c for c in violated if c in LLAMAGUARD_REQUIRE_CHECKS]
-                if not required_overlap:
-                    logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as unsafe ({violated}), but does not match any required categories: {LLAMAGUARD_REQUIRE_CHECKS}")
-                    return False
-                else:
-                    logging.info(f"[{source_chat}]{label_prefix} Media matches required safety check: {required_overlap}. Passing.")
-                    return True
-
-            # 3. Default behavior if no required-list and no block-list overlap
-            if LLAMAGUARD_CHECKS:
-                logging.info(f"[{source_chat}]{label_prefix} Media classified as unsafe ({violated}), but none are in configured important checks ({LLAMAGUARD_CHECKS}). Passing.")
-                return True
-            else:
-                # If LLAMAGUARD_CHECKS is empty and no required-list is configured, we block any unsafe classification by default.
-                logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates Llama Guard categories: {violated}")
-                return False
-                
+            return False, violated
         elif status == "safe":
-            # If we require certain unsafe categories, safe content is NOT allowed!
-            if LLAMAGUARD_REQUIRE_CHECKS:
-                logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as safe, but does not match any required unsafe categories: {LLAMAGUARD_REQUIRE_CHECKS}")
+            return True, []
+        else:
+            logging.error(f"[{source_chat}]{label_prefix} Llama Guard returned unexpected status '{status}'.")
+            return None, []
+            
+    except Exception as e:
+        logging.error(f"[{source_chat}]{label_prefix} Error during Llama Guard safety check: {e}")
+        return None, []
+
+
+async def check_single_image_safety(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> bool:
+    """
+    Checks the safety of a single image/frame against the Llama Guard API.
+    Returns True if safe/allowed to pass, False if unsafe/blocked.
+    """
+    is_safe, violated = await get_image_safety_classification(image_bytes, source_chat, filename, index_label)
+    if is_safe is None:
+        return False  # Block on API error / fail-closed
+        
+    label_prefix = f" [{index_label}]" if index_label else ""
+    
+    if not is_safe:
+        # 1. Block-list check (LLAMAGUARD_CHECKS)
+        if LLAMAGUARD_CHECKS:
+            overlap = [c for c in violated if c in LLAMAGUARD_CHECKS]
+            if overlap:
+                logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates configured Llama Guard categories: {overlap}")
                 return False
+
+        # 2. Required-list check (LLAMAGUARD_REQUIRE_CHECKS)
+        if LLAMAGUARD_REQUIRE_CHECKS:
+            required_overlap = [c for c in violated if c in LLAMAGUARD_REQUIRE_CHECKS]
+            if not required_overlap:
+                logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as unsafe ({violated}), but does not match any required categories: {LLAMAGUARD_REQUIRE_CHECKS}")
+                return False
+            else:
+                logging.info(f"[{source_chat}]{label_prefix} Media matches required safety check: {required_overlap}. Passing.")
+                return True
+
+        # 3. Default behavior if no required-list and no block-list overlap
+        if LLAMAGUARD_CHECKS:
+            logging.info(f"[{source_chat}]{label_prefix} Media classified as unsafe ({violated}), but none are in configured important checks ({LLAMAGUARD_CHECKS}). Passing.")
             return True
         else:
-            logging.error(f"[{source_chat}]{label_prefix} Llama Guard returned unexpected status '{status}'. Blocking due to check failure.")
+            logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates Llama Guard categories: {violated}")
             return False
-        
-    except Exception as e:
-        logging.error(f"[{source_chat}]{label_prefix} Error during Llama Guard safety check: {e}. Blocking due to check failure.")
-        return False
+            
+    else:  # safe
+        if LLAMAGUARD_REQUIRE_CHECKS:
+            logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as safe, but does not match any required unsafe categories: {LLAMAGUARD_REQUIRE_CHECKS}")
+            return False
+        return True
 
 
 async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: str, filename: str) -> bool:
     """
     Checks the safety of the media using Meta Llama Guard via an OpenAI-compatible Vision API.
-    Returns True if the media is safe, False if it is unsafe or if the check fails.
+    Returns True if the media is safe/allowed, False if it is unsafe/blocked.
     """
     if not LLAMAGUARD_API_URL:
         return True # Disabled, pass by default
@@ -423,10 +433,64 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
     tasks = []
     for i, img_bytes in enumerate(image_list):
         label = f"frame {i+1}/{len(image_list)}"
-        tasks.append(check_single_image_safety(img_bytes, source_chat, filename, label))
+        tasks.append(get_image_safety_classification(img_bytes, source_chat, filename, label))
 
     results = await asyncio.gather(*tasks)
-    return all(results)
+    
+    # Analyze aggregated results for video frames
+    # results is a list of tuple[bool | None, list[str]]
+    
+    # 1. Check for any API/processing errors (fail-closed)
+    for is_safe, _ in results:
+        if is_safe is None:
+            logging.error(f"[{source_chat}] One or more video frames failed classification. Blocking video due to fail-closed safety policy.")
+            return False
+
+    # 2. Block-list check (LLAMAGUARD_CHECKS)
+    # If ANY frame contains a category in LLAMAGUARD_CHECKS, we block the entire video.
+    if LLAMAGUARD_CHECKS:
+        for i, (is_safe, violated) in enumerate(results):
+            if not is_safe:
+                overlap = [c for c in violated if c in LLAMAGUARD_CHECKS]
+                if overlap:
+                    logging.warning(f"[{source_chat}] BLOCKING video {filename}! Frame {i+1} violates configured Llama Guard categories: {overlap}")
+                    return False
+
+    # 3. Required-list check (LLAMAGUARD_REQUIRE_CHECKS)
+    # If whitelisting is active:
+    # - At least ONE frame must match one of the required categories.
+    # - Safe frames do not block the video in this context (since it's a video, and we only need the video to contain the required content somewhere).
+    if LLAMAGUARD_REQUIRE_CHECKS:
+        matched_required = False
+        all_violated_matched = []
+        for i, (is_safe, violated) in enumerate(results):
+            if not is_safe:
+                required_overlap = [c for c in violated if c in LLAMAGUARD_REQUIRE_CHECKS]
+                if required_overlap:
+                    matched_required = True
+                    all_violated_matched.extend(required_overlap)
+                    
+        if not matched_required:
+            logging.warning(f"[{source_chat}] BLOCKING video {filename}! No frames matched any required categories: {LLAMAGUARD_REQUIRE_CHECKS}")
+            return False
+        else:
+            logging.info(f"[{source_chat}] Video matches required safety check (found required categories {list(set(all_violated_matched))}). Passing.")
+            return True
+
+    # 4. Default check if no required-list is configured
+    # Under the default policy (or when only LLAMAGUARD_CHECKS is set), a video is allowed if no frames violate the block-list.
+    # If LLAMAGUARD_CHECKS is empty and LLAMAGUARD_REQUIRE_CHECKS is empty:
+    # - Any unsafe frame blocks the video by default.
+    if not LLAMAGUARD_CHECKS:
+        # LLAMAGUARD_CHECKS is empty, and LLAMAGUARD_REQUIRE_CHECKS is empty:
+        # This is the "block all unsafe content" mode. Any unsafe frame blocks the video.
+        for i, (is_safe, violated) in enumerate(results):
+            if not is_safe:
+                logging.warning(f"[{source_chat}] BLOCKING video {filename}! Frame {i+1} violates Llama Guard categories: {violated}")
+                return False
+
+    logging.info(f"[{source_chat}] Video {filename} successfully passed safety checks.")
+    return True
 
 
 tg_client = TelegramClient(
