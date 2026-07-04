@@ -711,7 +711,8 @@ async def main():
     if LLAMAGUARD_API_URL:
         logging.info(f"Llama Guard Model: {LLAMAGUARD_MODEL_NAME}")
         logging.info(f"Llama Guard Video Frames: {LLAMAGUARD_VIDEO_FRAMES} (Random Selection: {LLAMAGUARD_RANDOM_FRAMES})")
-        logging.info(f"Llama Guard Checks Filter: {list(LLAMAGUARD_CHECKS) if LLAMAGUARD_CHECKS else 'ALL categories'}")
+        logging.info(f"Llama Guard Checks Filter (Block List): {list(LLAMAGUARD_CHECKS) if LLAMAGUARD_CHECKS else 'ALL categories'}")
+        logging.info(f"Llama Guard Required Checks (Whitelist): {list(LLAMAGUARD_REQUIRE_CHECKS) if LLAMAGUARD_REQUIRE_CHECKS else 'None (safe content allowed)'}")
     try:
         await tg_client.run_until_disconnected()
     finally:
