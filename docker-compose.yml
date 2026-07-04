@@ -22,4 +22,7 @@ services:
       - LLAMAGUARD_MODEL_NAME=meta-llama/llama-guard-4-12b
       - LLAMAGUARD_API_KEY=
       - LLAMAGUARD_CHECKS=
+      - LLAMAGUARD_VIDEO_FRAMES=5
+      - LLAMAGUARD_RANDOM_FRAMES=true
+
 

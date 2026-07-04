@@ -42,6 +42,15 @@ try:
     LLAMAGUARD_MODEL_NAME = os.environ.get("LLAMAGUARD_MODEL_NAME", "meta-llama/llama-guard-4-12b").strip()
     LLAMAGUARD_API_KEY = os.environ.get("LLAMAGUARD_API_KEY", "").strip() or None
 
+    try:
+        LLAMAGUARD_VIDEO_FRAMES = int(os.environ.get("LLAMAGUARD_VIDEO_FRAMES", "5"))
+        if LLAMAGUARD_VIDEO_FRAMES < 1:
+            LLAMAGUARD_VIDEO_FRAMES = 1
+    except ValueError:
+        LLAMAGUARD_VIDEO_FRAMES = 5
+
+    LLAMAGUARD_RANDOM_FRAMES = get_env_bool("LLAMAGUARD_RANDOM_FRAMES", True)
+
     LLAMAGUARD_CHECKS = set()
     checks_raw = os.environ.get("LLAMAGUARD_CHECKS", "")
     if checks_raw:
@@ -137,69 +146,93 @@ async def get_topic_name(client, chat_entity, topic_id):
     return f"Topic {topic_id}"
 
 
-def extract_video_frame(video_bytes: bytes) -> bytes:
-    """Extracts the middle frame of the video as JPEG bytes in-memory"""
+def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bool = True) -> list:
+    """Extracts up to max_frames frames from the video as JPEG bytes in-memory (either evenly spaced or randomly selected)"""
     try:
         import av
         from PIL import Image
         import io
+        import random
     except ImportError:
         logging.error("PygAV (av) or Pillow (PIL) package is missing! Please install them to enable video frame safety moderation.")
-        return None
+        return []
 
+    frames_bytes = []
     try:
         container = av.open(io.BytesIO(video_bytes))
         video_stream = container.streams.video[0]
         
-        # Get total duration or frame count to pick the middle frame
         total_frames = video_stream.frames
-        target_frame_idx = total_frames // 2 if total_frames and total_frames > 1 else 0
+        if not total_frames:
+            # Estimate from duration and frame rate if available
+            duration = video_stream.duration
+            time_base = video_stream.time_base
+            average_rate = video_stream.average_rate
+            if duration is not None and time_base is not None and average_rate is not None:
+                try:
+                    total_seconds = float(duration * time_base)
+                    total_frames = int(total_seconds * float(average_rate))
+                except Exception:
+                    total_frames = 0
         
-        frame_count = 0
-        for frame in container.decode(video=0):
-            if frame_count >= target_frame_idx:
+        # If total_frames is not available, try to decode up to some reasonable limit or read first frames
+        if not total_frames or total_frames <= 1:
+            for frame in container.decode(video=0):
                 img = frame.to_image()
                 img_bytes_io = io.BytesIO()
                 img.save(img_bytes_io, format="JPEG")
-                return img_bytes_io.getvalue()
-            frame_count += 1
-            
-        # Fallback to the first frame
-        container.seek(0)
+                frames_bytes.append(img_bytes_io.getvalue())
+                if len(frames_bytes) >= max_frames:
+                    break
+            return frames_bytes
+
+        # If we have total_frames, select the target frame indices
+        if total_frames <= max_frames:
+            target_indices = list(range(total_frames))
+        elif use_random:
+            target_indices = sorted(random.sample(range(total_frames), max_frames))
+        else:
+            step = total_frames / max_frames
+            target_indices = [int((i + 0.5) * step) for i in range(max_frames)]
+            # Keep bounds
+            target_indices = [max(0, min(total_frames - 1, idx)) for idx in target_indices]
+            # Ensure unique, sorted indices
+            target_indices = sorted(list(set(target_indices)))
+
+        target_set = set(target_indices)
+        frame_count = 0
         for frame in container.decode(video=0):
-            img = frame.to_image()
-            img_bytes_io = io.BytesIO()
-            img.save(img_bytes_io, format="JPEG")
-            return img_bytes_io.getvalue()
-            
+            if frame_count in target_set:
+                img = frame.to_image()
+                img_bytes_io = io.BytesIO()
+                img.save(img_bytes_io, format="JPEG")
+                frames_bytes.append(img_bytes_io.getvalue())
+                if len(frames_bytes) >= len(target_set):
+                    break
+            frame_count += 1
+
+        # Fallback if no frames were decoded but we expected them
+        if not frames_bytes:
+            container.seek(0)
+            for frame in container.decode(video=0):
+                img = frame.to_image()
+                img_bytes_io = io.BytesIO()
+                img.save(img_bytes_io, format="JPEG")
+                frames_bytes.append(img_bytes_io.getvalue())
+                break
+
     except Exception as e:
-        logging.error(f"Failed to extract frame from video: {e}")
-    return None
+        logging.error(f"Failed to extract frames from video: {e}")
+    return frames_bytes
 
 
-async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: str, filename: str) -> bool:
+async def check_single_image_safety(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> bool:
     """
-    Checks the safety of the media using Meta Llama Guard via an OpenAI-compatible Vision API.
-    Returns True if the media is safe, False if it is unsafe or if the check fails.
+    Checks the safety of a single image/frame against the Llama Guard API.
+    Returns True if safe (or if filtering is disabled), False if unsafe/fails.
     """
-    if not LLAMAGUARD_API_URL:
-        return True # Disabled, pass by default
-
-    image_bytes = None
-    if mime_type.startswith("image/"):
-        image_bytes = media_bytes
-    elif mime_type.startswith("video/"):
-        logging.info(f"[{source_chat}] Extracting frame from video {filename} for Llama Guard safety check...")
-        image_bytes = await asyncio.to_thread(extract_video_frame, media_bytes)
-        if not image_bytes:
-            logging.error(f"[{source_chat}] Could not extract video frame for safety check. Blocking media due to check failure.")
-            return False
-
-    if not image_bytes:
-        logging.error(f"[{source_chat}] No image bytes available for safety check. Blocking media due to check failure.")
-        return False
-
-    logging.info(f"[{source_chat}] Calling Llama Guard API ({LLAMAGUARD_MODEL_NAME}) for safety classification of {filename}...")
+    label_prefix = f" [{index_label}]" if index_label else ""
+    logging.info(f"[{source_chat}]{label_prefix} Calling Llama Guard API ({LLAMAGUARD_MODEL_NAME}) for safety classification of {filename}...")
     
     try:
         # Encode image to base64
@@ -258,15 +291,15 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
         resp_json = json.loads(response_bytes.decode('utf-8'))
         
         if "choices" not in resp_json or not resp_json["choices"]:
-            logging.error(f"[{source_chat}] Unexpected Llama Guard API response structure: {resp_json}. Blocking media due to check failure.")
+            logging.error(f"[{source_chat}]{label_prefix} Unexpected Llama Guard API response structure: {resp_json}. Blocking due to check failure.")
             return False
             
         response_text = resp_json["choices"][0]["message"]["content"].strip()
-        logging.info(f"[{source_chat}] Llama Guard classification result: {response_text}")
+        logging.info(f"[{source_chat}]{label_prefix} Llama Guard classification result: {response_text}")
         
         lines = response_text.split()
         if not lines:
-            logging.error(f"[{source_chat}] Llama Guard returned empty response. Blocking media due to check failure.")
+            logging.error(f"[{source_chat}]{label_prefix} Llama Guard returned empty response. Blocking due to check failure.")
             return False
             
         status = lines[0].lower()
@@ -286,24 +319,59 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
             if LLAMAGUARD_CHECKS:
                 overlap = [c for c in violated if c in LLAMAGUARD_CHECKS]
                 if overlap:
-                    logging.warning(f"[{source_chat}] BLOCKING media {filename}! Violates configured Llama Guard categories: {overlap}")
+                    logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates configured Llama Guard categories: {overlap}")
                     return False
                 else:
-                    logging.info(f"[{source_chat}] Media {filename} classified as unsafe ({violated}), but none are in configured important checks ({LLAMAGUARD_CHECKS}). Passing.")
+                    logging.info(f"[{source_chat}]{label_prefix} Media classified as unsafe ({violated}), but none are in configured important checks ({LLAMAGUARD_CHECKS}). Passing.")
                     return True
             else:
-                logging.warning(f"[{source_chat}] BLOCKING media {filename}! Violates Llama Guard categories: {violated}")
+                logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates Llama Guard categories: {violated}")
                 return False
                 
         elif status == "safe":
             return True
         else:
-            logging.error(f"[{source_chat}] Llama Guard returned unexpected status '{status}'. Blocking media due to check failure.")
+            logging.error(f"[{source_chat}]{label_prefix} Llama Guard returned unexpected status '{status}'. Blocking due to check failure.")
             return False
         
     except Exception as e:
-        logging.error(f"[{source_chat}] Error during Llama Guard safety check: {e}. Blocking media due to check failure.")
+        logging.error(f"[{source_chat}]{label_prefix} Error during Llama Guard safety check: {e}. Blocking due to check failure.")
         return False
+
+
+async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: str, filename: str) -> bool:
+    """
+    Checks the safety of the media using Meta Llama Guard via an OpenAI-compatible Vision API.
+    Returns True if the media is safe, False if it is unsafe or if the check fails.
+    """
+    if not LLAMAGUARD_API_URL:
+        return True # Disabled, pass by default
+
+    image_list = []
+    if mime_type.startswith("image/"):
+        image_list = [media_bytes]
+    elif mime_type.startswith("video/"):
+        logging.info(f"[{source_chat}] Extracting up to {LLAMAGUARD_VIDEO_FRAMES} frames from video {filename} for Llama Guard safety check...")
+        image_list = await asyncio.to_thread(extract_video_frames, media_bytes, LLAMAGUARD_VIDEO_FRAMES, LLAMAGUARD_RANDOM_FRAMES)
+        if not image_list:
+            logging.error(f"[{source_chat}] Could not extract any video frames for safety check. Blocking media due to check failure.")
+            return False
+
+    if not image_list:
+        logging.error(f"[{source_chat}] No image bytes available for safety check. Blocking media due to check failure.")
+        return False
+
+    if len(image_list) == 1:
+        return await check_single_image_safety(image_list[0], source_chat, filename)
+
+    # Spawn parallel safety checks for all extracted video frames
+    tasks = []
+    for i, img_bytes in enumerate(image_list):
+        label = f"frame {i+1}/{len(image_list)}"
+        tasks.append(check_single_image_safety(img_bytes, source_chat, filename, label))
+
+    results = await asyncio.gather(*tasks)
+    return all(results)
 
 
 tg_client = TelegramClient(
@@ -587,6 +655,7 @@ async def main():
     logging.info(f"Llama Guard Moderation: {'Enabled' if LLAMAGUARD_API_URL else 'Disabled'}")
     if LLAMAGUARD_API_URL:
         logging.info(f"Llama Guard Model: {LLAMAGUARD_MODEL_NAME}")
+        logging.info(f"Llama Guard Video Frames: {LLAMAGUARD_VIDEO_FRAMES} (Random Selection: {LLAMAGUARD_RANDOM_FRAMES})")
         logging.info(f"Llama Guard Checks Filter: {list(LLAMAGUARD_CHECKS) if LLAMAGUARD_CHECKS else 'ALL categories'}")
     try:
         await tg_client.run_until_disconnected()

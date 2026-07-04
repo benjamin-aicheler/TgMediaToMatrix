@@ -51,6 +51,9 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `LLAMAGUARD_MODEL_NAME` | Model name to request for safety moderation | `meta-llama/llama-guard-4-12b` |
 | `LLAMAGUARD_API_KEY` | API authentication key for Llama Guard endpoint if required | `your-api-key` (Default: `None`) |
 | `LLAMAGUARD_CHECKS` | Comma-separated list of safety categories to block. If empty, blocks on any safety violation. | `S1,S2,S3,S4` (Default: empty / block on any) |
+| `LLAMAGUARD_VIDEO_FRAMES` | Number of frames to extract and check concurrently from each video | `5` (Default: `5`) |
+| `LLAMAGUARD_RANDOM_FRAMES` | Extract frames randomly throughout the video duration instead of evenly spaced. Set to `false` for evenly spaced selection. | `true` (Default: `true`) |
+
 
 ### Specifying Channels & Topics in `TG_CHANNELS`
 The `TG_CHANNELS` environment variable accepts a comma-separated list of several formats:
@@ -65,8 +68,8 @@ The `TG_CHANNELS` environment variable accepts a comma-separated list of several
 The bridge supports real-time, automated image and video content moderation using Meta Llama Guard 4 12B (or any OpenAI-compatible API endpoint hosting a compatible model).
 
 ### How it Works
-1. **In-Memory Frame Extraction**: When a video is downloaded, the bridge extracts its middle frame in-memory as JPEG bytes using `PyAV` (`av`) and `Pillow` (`PIL`). No media files are ever written to disk.
-2. **OpenAI-Compatible Vision API**: The bridge encodes the image (or extracted video frame) into base64 and forwards it to the specified OpenAI-compatible `/chat/completions` vision endpoint.
+1. **In-Memory Frame Extraction**: When a video is downloaded, the bridge extracts multiple frames (configurable via `LLAMAGUARD_VIDEO_FRAMES`, defaults to `5`) in-memory using `PyAV` (`av`) and `Pillow` (`PIL`). By default, frames are selected randomly from across the video duration for maximum safety coverage (or evenly spaced if `LLAMAGUARD_RANDOM_FRAMES` is set to `false`). No media files are ever written to disk.
+2. **Concurrent Safety Queries**: The bridge encodes each extracted frame into base64 and schedules Llama Guard safety API calls for all of them concurrently (in parallel) using Python's `asyncio.gather` for maximum throughput and near-instant audit times. If *any single frame* is flagged as unsafe or fails to check, the entire video is blocked (fail-closed).
 3. **Classification and Categories**: Llama Guard typically outputs safety ratings (e.g., `safe` or `unsafe` followed by the violated categories like `S1`, `S2`, etc.).
 4. **Fail-Closed Design**: If the Llama Guard endpoint is unreachable, is misconfigured, or lacks the necessary library bindings (`av` or `Pillow`), the bridge logs the error and blocks the media from being forwarded. This ensures that no unchecked or unmoderated media passes through when content moderation is enabled.
 
