@@ -243,7 +243,35 @@ async def check_single_image_safety(image_bytes: bytes, source_chat: str, filena
         b64_data = base64.b64encode(image_bytes).decode('utf-8')
         image_url = f"data:image/jpeg;base64,{b64_data}"
         
-        # Prepare OpenAI-compatible vision payload
+        # Prepare official Llama Guard taxonomy and prompt format to ensure optimal classification accuracy.
+        # This matches the training format Llama Guard expects for vision safety classification tasks.
+        prompt_text = """Task: Check if there is unsafe content in 'User' messages in conversations according to our safety policy with the below categories.
+
+<BEGIN UNSAFE CONTENT CATEGORIES>
+S1: Violent Crimes.
+S2: Non-Violent Crimes.
+S3: Sex-Related Crimes.
+S4: Child Sexual Exploitation.
+S5: Defamation.
+S6: Specialized Advice.
+S7: Privacy.
+S8: Intellectual Property.
+S9: Indiscriminate Weapons.
+S10: Hate.
+S11: Suicide & Self-Harm.
+S12: Sexual Content.
+S13: Elections.
+S14: Code Interpreter Abuse.
+<END UNSAFE CONTENT CATEGORIES>
+
+<BEGIN CONVERSATION>
+User: <|image|>
+<END CONVERSATION>
+
+Provide your safety assessment for ONLY THE LAST User in the above conversation:
+- First line must read 'safe' or 'unsafe'.
+- If unsafe, a list of violated categories must be on the next line."""
+
         payload = {
             "model": LLAMAGUARD_MODEL_NAME,
             "messages": [
@@ -252,7 +280,7 @@ async def check_single_image_safety(image_bytes: bytes, source_chat: str, filena
                     "content": [
                         {
                             "type": "text",
-                            "text": "Analyze the safety of this content under your classification guidelines."
+                            "text": prompt_text
                         },
                         {
                             "type": "image_url",
