@@ -199,3 +199,9 @@ This bridge strictly follows the project-specific developer guidelines:
 - **Consistent Log Entries**: All log records are context-aware and prefix entries with the source chat's resolved name/ID: `[{source_chat}]`.
 - **Descriptive Error Handling**: Startup verification processes make sure that all required configurations are thoroughly validated at runtime. Any failure will output a clean descriptive traceback, preventing silent failure.
 - **Graceful Fault Tolerance**: Errors inside individual album elements or single uploads won't crash the container—the loop will handle, log, and skip gracefully.
+
+---
+
+## AI Disclosure
+
+This project was built and designed in partnership with **Antigravity**, a powerful agentic AI coding assistant designed by Google DeepMind. All architectural choices, code styles, and advanced features (such as Llama Guard whitelisting/filtering and in-memory frame extraction) were developed with AI pair programming.
