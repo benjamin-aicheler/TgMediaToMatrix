@@ -732,12 +732,11 @@ async def process_and_upload_media(message, source_chat, channel_name):
             "format": "org.matrix.custom.html",
             "formatted_body": formatted_body_text
         }
+        if blurhash_str:
+            info_dict["xyz.amorgan.blurhash"] = blurhash_str
+
         if info_dict:
             matrix_content["info"] = info_dict
-        if blurhash_str:
-            # MSC2448: clients read the hash from the top level of the content,
-            # not from info, and still use the unstable prefix.
-            matrix_content["xyz.amorgan.blurhash"] = blurhash_str
 
         send_response = await matrix_client.room_send(
             room_id=MATRIX_ROOM_ID,

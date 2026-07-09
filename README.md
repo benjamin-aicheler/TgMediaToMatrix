@@ -17,6 +17,7 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
   - Populates standard `body`, `filename`, and `info.filename` metadata so both legacy and modern Matrix clients render the filename cleanly.
   - Generates beautiful rich HTML captions (`formatted_body`) adhering to **MSC2530 (Media Captions)** so that clients like Element, Cinny, and SchildiChat render the channel display prefix and filename as clean inline subtexts underneath image/video views.
 - **Full Metadata Extraction & Thumbnail Probing**: Extracts exact width, height, and duration dimensions from video documents. Uses `Pillow` to robustly probe thumbnail dimensions and formats directly from downloaded image bytes, ensuring Matrix metadata matches the actual media file precisely.
+- **Automatic Blurhash Previews (MSC2448)**: Generates and attaches Blurhash placeholders (`xyz.amorgan.blurhash` inside the `info` metadata) to image and video events in-memory, allowing compatible Matrix clients to show beautiful, low-fidelity blurred placeholders while the actual media is loading.
 - **Caption Privacy Limit**: Discards original Telegram captions entirely—forwarding only the channel name/topic display name prefix and the media file name to avoid clutter.
 - **Automatic File Size Limiting**: Rejects media larger than the configured limit (e.g., 50MB) to preserve resources and server bandwidth.
 
