@@ -9,6 +9,7 @@ This file contains development rules and architectural guidelines for AI agents 
 ### Asynchronous Operations
 - Always use asynchronous coding practices with Python's standard `asyncio` library.
 - Avoid blocking I/O calls. Use appropriate async methods from `Telethon` and `matrix-nio`.
+- Offload CPU-bound, image/video-processing, or blocking synchronous function calls (like PIL image open/probe/resize or PyAV video frame extraction) to background threads using `asyncio.to_thread` or a thread pool executor to prevent stalling the main event loop.
 
 ### Matrix Integration
 - Prefer `matrix-nio` native library functions over custom HTTP requests.

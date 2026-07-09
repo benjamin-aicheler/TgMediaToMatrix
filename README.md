@@ -16,7 +16,7 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
 - **Enhanced Client Compatibility**:
   - Populates standard `body`, `filename`, and `info.filename` metadata so both legacy and modern Matrix clients render the filename cleanly.
   - Generates beautiful rich HTML captions (`formatted_body`) adhering to **MSC2530 (Media Captions)** so that clients like Element, Cinny, and SchildiChat render the channel display prefix and filename as clean inline subtexts underneath image/video views.
-- **Full Metadata Extraction**: Extracts exact width, height, and duration dimensions from video documents and photo sizes, automatically retrieving and uploading matching video/image thumbnails.
+- **Full Metadata Extraction & Thumbnail Probing**: Extracts exact width, height, and duration dimensions from video documents. Uses `Pillow` to robustly probe thumbnail dimensions and formats directly from downloaded image bytes, ensuring Matrix metadata matches the actual media file precisely.
 - **Caption Privacy Limit**: Discards original Telegram captions entirely—forwarding only the channel name/topic display name prefix and the media file name to avoid clutter.
 - **Automatic File Size Limiting**: Rejects media larger than the configured limit (e.g., 50MB) to preserve resources and server bandwidth.
 
@@ -127,7 +127,7 @@ Edit the `docker-compose.yml` file and insert your configuration credentials:
 ```yaml
 services:
   telegram-matrix-bridge:
-    image: python:3.11-slim
+    image: python:3.14-slim
     container_name: tg_matrix_media_bridge
     restart: unless-stopped
     volumes:
@@ -149,6 +149,7 @@ services:
       - LLAMAGUARD_MODEL_NAME=meta-llama/llama-guard-4-12b
       - LLAMAGUARD_API_KEY=
       - LLAMAGUARD_CHECKS=
+      - LLAMAGUARD_REQUIRE_CHECKS=
 
 ```
 
