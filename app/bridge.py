@@ -234,10 +234,21 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
     return frames_bytes
 
 
-# Formats a Telegram thumbnail can legitimately be. Anything else is treated as
+# Formats a Telegram still image can legitimately be. Anything else is treated as
 # undecodable: Pillow's TGA/DDS plugins accept near-arbitrary bytes, so without
 # this whitelist a corrupt thumbnail would probe as a bogus multi-thousand-pixel image.
-THUMBNAIL_FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
+STILL_IMAGE_FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
+
+# Component counts of the encoded blurhash. 4x3 is the common choice for landscape
+# previews and what most Matrix clients are tuned for.
+BLURHASH_COMPONENTS_X = 4
+BLURHASH_COMPONENTS_Y = 3
+
+# The blurhash only encodes the lowest spatial frequencies of the image, so a
+# downscaled copy produces a visually identical hash. The encoder is pure Python
+# and costs linear time in the pixel count, so this bound is what keeps a
+# full-resolution photo at tens of milliseconds instead of tens of seconds.
+BLURHASH_MAX_EDGE = 64
 
 
 def probe_image(image_bytes: bytes) -> tuple[int, int, str] | None:
@@ -251,7 +262,7 @@ def probe_image(image_bytes: bytes) -> tuple[int, int, str] | None:
 
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
-            if img.format not in THUMBNAIL_FORMATS:
+            if img.format not in STILL_IMAGE_FORMATS:
                 logging.debug(f"Ignoring thumbnail of unexpected format {img.format}.")
                 return None
             width, height = img.size
@@ -262,6 +273,44 @@ def probe_image(image_bytes: bytes) -> tuple[int, int, str] | None:
             return int(width), int(height), mime
     except Exception as e:
         logging.debug(f"Could not probe thumbnail bytes: {e}")
+        return None
+
+
+def compute_blurhash(image_bytes: bytes) -> str | None:
+    """Encodes a blurhash from still image bytes, downscaling them to a thumbnail first.
+
+    Returns None whenever a hash cannot be produced. A blurhash is a rendering
+    nicety rather than a safety property, so an absent package or an undecodable
+    image degrades to an event without one, never to dropped media."""
+    try:
+        from PIL import Image
+        import blurhash
+    except ImportError:
+        logging.debug("Pillow (PIL) or blurhash package is missing; sending media without a blurhash.")
+        return None
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            if img.format not in STILL_IMAGE_FORMATS:
+                logging.debug(f"Refusing to blurhash unexpected format {img.format}.")
+                return None
+            # Decode into an RGB copy while the source is still open, so the copy
+            # outlives the context manager that closes the source.
+            thumbnail = img.convert("RGB")
+
+        thumbnail.thumbnail((BLURHASH_MAX_EDGE, BLURHASH_MAX_EDGE))
+
+        # blurhash.encode() wants rows of (r, g, b) rather than an Image.
+        width, height = thumbnail.size
+        raw = thumbnail.tobytes()
+        stride = width * 3
+        rows = [
+            [tuple(raw[x:x + 3]) for x in range(y * stride, (y + 1) * stride, 3)]
+            for y in range(height)
+        ]
+        return blurhash.encode(rows, BLURHASH_COMPONENTS_X, BLURHASH_COMPONENTS_Y)
+    except Exception as e:
+        logging.debug(f"Could not compute blurhash: {e}")
         return None
 
 
@@ -627,6 +676,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
                 info_dict["h"] = int(largest.h)
 
         # Thumbnail upload for videos and images
+        blurhash_bytes = None
         if msg_type in ("m.video", "m.image"):
             try:
                 thumb_idx = -1 if msg_type == "m.video" else 0
@@ -640,6 +690,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
                     if not probed:
                         logging.debug(f"[{source_chat}] Thumbnail skipped: bytes are not a decodable still image.")
                     else:
+                        blurhash_bytes = thumb_bytes
                         thumb_w, thumb_h, thumb_mime = probed
                         thumb_ext = thumb_mime.split('/', 1)[1]
                         thumb_resp, _ = await matrix_client.upload(
@@ -659,6 +710,17 @@ async def process_and_upload_media(message, source_chat, channel_name):
             except Exception as thumb_err:
                 logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
+        # The blurhash is always encoded from a thumbnail. Telegram did not always
+        # give us a usable one, so for images fall back to the full-size bytes and
+        # let compute_blurhash() downscale them itself. A video without a decodable
+        # thumbnail has no still frame Pillow can read, and gets no blurhash.
+        if blurhash_bytes is None and is_image:
+            blurhash_bytes = media_bytes
+
+        blurhash_str = None
+        if blurhash_bytes is not None:
+            blurhash_str = await asyncio.to_thread(compute_blurhash, blurhash_bytes)
+
         body_text = f"[{channel_name}]"
         formatted_body_text = f"[{channel_name}]"
 
@@ -672,6 +734,10 @@ async def process_and_upload_media(message, source_chat, channel_name):
         }
         if info_dict:
             matrix_content["info"] = info_dict
+        if blurhash_str:
+            # MSC2448: clients read the hash from the top level of the content,
+            # not from info, and still use the unstable prefix.
+            matrix_content["xyz.amorgan.blurhash"] = blurhash_str
 
         send_response = await matrix_client.room_send(
             room_id=MATRIX_ROOM_ID,

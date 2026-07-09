@@ -134,7 +134,7 @@ services:
       - ./app:/app
       - ./session_data:/app/session
     working_dir: /app
-    command: sh -c "pip install --no-cache-dir telethon matrix-nio av Pillow && python bridge.py"
+    command: sh -c "pip install --no-cache-dir telethon matrix-nio av Pillow blurhash && python bridge.py"
     environment:
       - TG_API_ID=your_tg_api_id
       - TG_API_HASH=your_tg_api_hash
