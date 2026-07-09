@@ -234,6 +234,37 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
     return frames_bytes
 
 
+# Formats a Telegram thumbnail can legitimately be. Anything else is treated as
+# undecodable: Pillow's TGA/DDS plugins accept near-arbitrary bytes, so without
+# this whitelist a corrupt thumbnail would probe as a bogus multi-thousand-pixel image.
+THUMBNAIL_FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
+
+
+def probe_image(image_bytes: bytes) -> tuple[int, int, str] | None:
+    """Reads width, height and mime type straight from the encoded bytes.
+    Returns None if the bytes are not a decodable still image."""
+    try:
+        from PIL import Image
+    except ImportError:
+        logging.error("Pillow (PIL) package is missing! Please install it to enable thumbnail dimension probing.")
+        return None
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            if img.format not in THUMBNAIL_FORMATS:
+                logging.debug(f"Ignoring thumbnail of unexpected format {img.format}.")
+                return None
+            width, height = img.size
+            Image.init()
+            mime = Image.MIME.get(img.format)
+            if not mime or width < 1 or height < 1:
+                return None
+            return int(width), int(height), mime
+    except Exception as e:
+        logging.debug(f"Could not probe thumbnail bytes: {e}")
+        return None
+
+
 async def get_image_safety_classification(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> tuple[bool | None, list[str]]:
     """
     Calls Llama Guard API for a single image/frame.
@@ -601,44 +632,30 @@ async def process_and_upload_media(message, source_chat, channel_name):
                 thumb_idx = -1 if msg_type == "m.video" else 0
                 thumb_bytes = await message.download_media(thumb=thumb_idx, file=bytes)
                 if thumb_bytes:
-                    thumb_resp, _ = await matrix_client.upload(
-                        io.BytesIO(thumb_bytes),
-                        content_type="image/jpeg",
-                        filename="thumbnail.jpg",
-                        filesize=len(thumb_bytes)
-                    )
-                    if isinstance(thumb_resp, UploadResponse):
-                        info_dict["thumbnail_url"] = thumb_resp.content_uri
-                        
-                        # Extract exact width and height of the thumbnail if available
-                        thumb_w, thumb_h = None, None
-                        try:
-                            if msg_type == "m.image" and message.photo and message.photo.sizes:
-                                # thumb_idx = 0 represents the first (smallest) size
-                                if len(message.photo.sizes) > 0:
-                                    t_obj = message.photo.sizes[0]
-                                    if hasattr(t_obj, 'w') and t_obj.w is not None and hasattr(t_obj, 'h') and t_obj.h is not None:
-                                        thumb_w = int(t_obj.w)
-                                        thumb_h = int(t_obj.h)
-                            elif msg_type == "m.video" and message.document and message.document.thumbs:
-                                # thumb_idx = -1 represents the last (largest) thumbnail size
-                                if len(message.document.thumbs) > 0:
-                                    t_obj = message.document.thumbs[-1]
-                                    if hasattr(t_obj, 'w') and t_obj.w is not None and hasattr(t_obj, 'h') and t_obj.h is not None:
-                                        thumb_w = int(t_obj.w)
-                                        thumb_h = int(t_obj.h)
-                        except Exception as size_err:
-                            logging.debug(f"[{source_chat}] Failed to parse thumbnail dimensions: {size_err}")
-
-                        thumb_info = {
-                            "mimetype": "image/jpeg",
-                            "size": len(thumb_bytes)
-                        }
-                        if thumb_w is not None and thumb_h is not None:
-                            thumb_info["w"] = thumb_w
-                            thumb_info["h"] = thumb_h
-
-                        info_dict["thumbnail_info"] = thumb_info
+                    # Read the dimensions from the encoded bytes themselves, so they always
+                    # describe exactly what gets uploaded. A None probe means Telegram handed
+                    # us something that is not a still image (e.g. an animated VideoSize
+                    # preview), which has no place in thumbnail_url.
+                    probed = await asyncio.to_thread(probe_image, thumb_bytes)
+                    if not probed:
+                        logging.debug(f"[{source_chat}] Thumbnail skipped: bytes are not a decodable still image.")
+                    else:
+                        thumb_w, thumb_h, thumb_mime = probed
+                        thumb_ext = thumb_mime.split('/', 1)[1]
+                        thumb_resp, _ = await matrix_client.upload(
+                            io.BytesIO(thumb_bytes),
+                            content_type=thumb_mime,
+                            filename=f"thumbnail.{thumb_ext}",
+                            filesize=len(thumb_bytes)
+                        )
+                        if isinstance(thumb_resp, UploadResponse):
+                            info_dict["thumbnail_url"] = thumb_resp.content_uri
+                            info_dict["thumbnail_info"] = {
+                                "mimetype": thumb_mime,
+                                "size": len(thumb_bytes),
+                                "w": thumb_w,
+                                "h": thumb_h
+                            }
             except Exception as thumb_err:
                 logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
