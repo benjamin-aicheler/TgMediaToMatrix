@@ -721,8 +721,24 @@ async def process_and_upload_media(message, source_chat, channel_name):
         if blurhash_bytes is not None:
             blurhash_str = await asyncio.to_thread(compute_blurhash, blurhash_bytes)
 
-        body_text = f"[{channel_name}]"
-        formatted_body_text = f"[{channel_name}]"
+        # Build user-friendly metadata info (file size and dimensions if available)
+        metadata_parts = []
+        if info_dict and "w" in info_dict and "h" in info_dict:
+            metadata_parts.append(f"{info_dict['w']}×{info_dict['h']}")
+        
+        size_bytes = len(media_bytes)
+        if size_bytes < 1024:
+            size_str = f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            size_str = f"{size_bytes / 1024:.2f} KB"
+        else:
+            size_str = f"{size_bytes / (1024 * 1024):.2f} MB"
+        metadata_parts.append(size_str)
+        
+        metadata_str = ", ".join(metadata_parts)
+        
+        body_text = f"[{channel_name}] ({metadata_str})"
+        formatted_body_text = f"<strong>[{channel_name}]</strong> <small>({metadata_str})</small>"
 
         matrix_content = {
             "msgtype": msg_type,
