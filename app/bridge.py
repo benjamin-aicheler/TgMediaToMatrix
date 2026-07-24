@@ -293,6 +293,20 @@ def generate_image_thumbnail(image_bytes: bytes, max_size: int = 800) -> tuple[b
                 logging.debug(f"Refusing to generate thumbnail for unexpected format {img.format}.")
                 return None
 
+            # Get MIME format type
+            Image.init()
+            mime = Image.MIME.get(img.format)
+            if not mime:
+                return None
+
+            # Precaution: If image is already smaller than target thumbnail bounds,
+            # return the original bytes and dimensions immediately to avoid processing.
+            width, height = img.size
+            if width <= max_size and height <= max_size:
+                if width < 1 or height < 1:
+                    return None
+                return image_bytes, int(width), int(height), mime
+
             # Optimize JPEG decoding by using draft mode (scales during load)
             if img.format == "JPEG":
                 img.draft(img.mode, (max_size * 2, max_size * 2))
@@ -301,10 +315,7 @@ def generate_image_thumbnail(image_bytes: bytes, max_size: int = 800) -> tuple[b
 
             # Read size post-resize
             width, height = img.size
-
-            Image.init()
-            mime = Image.MIME.get(img.format)
-            if not mime or width < 1 or height < 1:
+            if width < 1 or height < 1:
                 return None
 
             out = io.BytesIO()
