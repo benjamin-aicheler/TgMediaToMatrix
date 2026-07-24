@@ -276,6 +276,47 @@ def probe_image(image_bytes: bytes) -> tuple[int, int, str] | None:
         return None
 
 
+def generate_image_thumbnail(image_bytes: bytes, max_size: int = 800) -> tuple[bytes, int, int, str] | None:
+    """Generates a high-quality downscaled thumbnail from still image bytes.
+
+    Returns (thumbnail_bytes, width, height, mime_type) or None if the bytes
+    could not be decoded or processed."""
+    try:
+        from PIL import Image
+    except ImportError:
+        logging.error("Pillow (PIL) package is missing! Cannot generate image thumbnail.")
+        return None
+
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            if img.format not in STILL_IMAGE_FORMATS:
+                logging.debug(f"Refusing to generate thumbnail for unexpected format {img.format}.")
+                return None
+
+            # Optimize JPEG decoding by using draft mode (scales during load)
+            if img.format == "JPEG":
+                img.draft(img.mode, (max_size * 2, max_size * 2))
+
+            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+
+            # Read size post-resize
+            width, height = img.size
+
+            Image.init()
+            mime = Image.MIME.get(img.format)
+            if not mime or width < 1 or height < 1:
+                return None
+
+            out = io.BytesIO()
+            save_format = img.format if img.format in ("PNG", "WEBP") else "JPEG"
+            img.save(out, format=save_format, quality=85, optimize=True)
+            return out.getvalue(), width, height, mime
+    except Exception as e:
+        logging.debug(f"Could not generate image thumbnail: {e}")
+        return None
+
+
+
 def compute_blurhash(image_bytes: bytes) -> str | None:
     """Encodes a blurhash from still image bytes, downscaling them to a thumbnail first.
 
@@ -679,34 +720,42 @@ async def process_and_upload_media(message, source_chat, channel_name):
         blurhash_bytes = None
         if msg_type in ("m.video", "m.image"):
             try:
-                thumb_idx = -1 if msg_type == "m.video" else 0
-                thumb_bytes = await message.download_media(thumb=thumb_idx, file=bytes)
+                thumb_bytes = None
+                thumb_w = None
+                thumb_h = None
+                thumb_mime = None
+
+                if msg_type == "m.image":
+                    # Generate thumbnail locally in-memory to save bandwidth and get optimal dimensions
+                    res = await asyncio.to_thread(generate_image_thumbnail, media_bytes)
+                    if res:
+                        thumb_bytes, thumb_w, thumb_h, thumb_mime = res
+                else:
+                    # For videos, download the high-resolution thumbnail from Telegram
+                    t_bytes = await message.download_media(thumb=-1, file=bytes)
+                    if t_bytes:
+                        probed = await asyncio.to_thread(probe_image, t_bytes)
+                        if probed:
+                            thumb_bytes = t_bytes
+                            thumb_w, thumb_h, thumb_mime = probed
+
                 if thumb_bytes:
-                    # Read the dimensions from the encoded bytes themselves, so they always
-                    # describe exactly what gets uploaded. A None probe means Telegram handed
-                    # us something that is not a still image (e.g. an animated VideoSize
-                    # preview), which has no place in thumbnail_url.
-                    probed = await asyncio.to_thread(probe_image, thumb_bytes)
-                    if not probed:
-                        logging.debug(f"[{source_chat}] Thumbnail skipped: bytes are not a decodable still image.")
-                    else:
-                        blurhash_bytes = thumb_bytes
-                        thumb_w, thumb_h, thumb_mime = probed
-                        thumb_ext = thumb_mime.split('/', 1)[1]
-                        thumb_resp, _ = await matrix_client.upload(
-                            io.BytesIO(thumb_bytes),
-                            content_type=thumb_mime,
-                            filename=f"thumbnail.{thumb_ext}",
-                            filesize=len(thumb_bytes)
-                        )
-                        if isinstance(thumb_resp, UploadResponse):
-                            info_dict["thumbnail_url"] = thumb_resp.content_uri
-                            info_dict["thumbnail_info"] = {
-                                "mimetype": thumb_mime,
-                                "size": len(thumb_bytes),
-                                "w": thumb_w,
-                                "h": thumb_h
-                            }
+                    blurhash_bytes = thumb_bytes
+                    thumb_ext = thumb_mime.split('/', 1)[1]
+                    thumb_resp, _ = await matrix_client.upload(
+                        io.BytesIO(thumb_bytes),
+                        content_type=thumb_mime,
+                        filename=f"thumbnail.{thumb_ext}",
+                        filesize=len(thumb_bytes)
+                    )
+                    if isinstance(thumb_resp, UploadResponse):
+                        info_dict["thumbnail_url"] = thumb_resp.content_uri
+                        info_dict["thumbnail_info"] = {
+                            "mimetype": thumb_mime,
+                            "size": len(thumb_bytes),
+                            "w": thumb_w,
+                            "h": thumb_h
+                        }
             except Exception as thumb_err:
                 logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
