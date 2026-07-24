@@ -50,6 +50,11 @@ This file contains development rules and architectural guidelines for AI agents 
 ### Filter Adherence
 - Fully respect user-configured safety categories in `LLAMAGUARD_CHECKS`. If the content is classified as unsafe but none of the violated categories overlap with the user's configured important checks, the media must be permitted to pass.
 
+### Media Thumbnailing
+- Image thumbnails must be generated dynamically in-memory from full-sized media bytes using Pillow rather than making redundant network requests to Telegram.
+- Check if the original image is already smaller than the max thumbnail bounds (e.g. 800x800) and return early with the original bytes to avoid unnecessary re-encoding.
+
 ### Dependency Isolation
 - Isolate the imports of optional binary/C-bound packages (like `av` and `PIL`) inside the functions that use them, catching `ImportError` gracefully, to keep the main service core runnable even if those specific packages are not present.
+
 
