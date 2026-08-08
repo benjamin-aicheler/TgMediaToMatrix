@@ -35,6 +35,28 @@ try:
     MAX_MEDIA_SIZE_MB = int(os.environ.get("MAX_MEDIA_SIZE_MB", 50))
     MAX_MEDIA_SIZE_BYTES = MAX_MEDIA_SIZE_MB * 1024 * 1024
 
+    try:
+        MIN_IMAGE_SIZE_KB = int(os.environ.get("MIN_IMAGE_SIZE_KB", 0))
+    except ValueError:
+        MIN_IMAGE_SIZE_KB = 0
+    if MIN_IMAGE_SIZE_KB == 0 and os.environ.get("MIN_IMAGE_SIZE_MB"):
+        try:
+            MIN_IMAGE_SIZE_KB = int(float(os.environ.get("MIN_IMAGE_SIZE_MB")) * 1024)
+        except ValueError:
+            MIN_IMAGE_SIZE_KB = 0
+    MIN_IMAGE_SIZE_BYTES = MIN_IMAGE_SIZE_KB * 1024
+
+    try:
+        MIN_VIDEO_SIZE_KB = int(os.environ.get("MIN_VIDEO_SIZE_KB", 0))
+    except ValueError:
+        MIN_VIDEO_SIZE_KB = 0
+    if MIN_VIDEO_SIZE_KB == 0 and os.environ.get("MIN_VIDEO_SIZE_MB"):
+        try:
+            MIN_VIDEO_SIZE_KB = int(float(os.environ.get("MIN_VIDEO_SIZE_MB")) * 1024)
+        except ValueError:
+            MIN_VIDEO_SIZE_KB = 0
+    MIN_VIDEO_SIZE_BYTES = MIN_VIDEO_SIZE_KB * 1024
+
     ENABLE_IMAGES = get_env_bool("ENABLE_IMAGES", True)
     ENABLE_VIDEOS = get_env_bool("ENABLE_VIDEOS", True)
 
@@ -667,6 +689,15 @@ async def process_and_upload_media(message, source_chat, channel_name):
         ext = "mp4" if mime_type.startswith("video/") else "jpg"
         filename = f"telegram_media_{message.id}.{ext}"
 
+    file_size = message.file.size if message.file else 0
+    if is_image and MIN_IMAGE_SIZE_BYTES > 0 and file_size < MIN_IMAGE_SIZE_BYTES:
+        logging.info(f"[{source_chat}] Skipping image {filename}: File size ({round(file_size / 1024, 2)} KB) is below minimum required size of {MIN_IMAGE_SIZE_KB} KB.")
+        return
+
+    if is_video and MIN_VIDEO_SIZE_BYTES > 0 and file_size < MIN_VIDEO_SIZE_BYTES:
+        logging.info(f"[{source_chat}] Skipping video {filename}: File size ({round(file_size / 1024, 2)} KB) is below minimum required size of {MIN_VIDEO_SIZE_KB} KB.")
+        return
+
     logging.info(f"[{source_chat}] Processing media: {filename} ({mime_type}). Starting Telegram download...")
     
     try:
@@ -927,7 +958,9 @@ async def main():
     logging.info("Starting Telegram client...")
     await tg_client.start()
     logging.info(f"Bridge successfully started and active for channels: {TG_CHANNELS}")
-    logging.info(f"Configured media limit: {MAX_MEDIA_SIZE_MB} MB")
+    logging.info(f"Configured max media limit: {MAX_MEDIA_SIZE_MB} MB")
+    logging.info(f"Configured min image limit: {MIN_IMAGE_SIZE_KB} KB ({round(MIN_IMAGE_SIZE_KB / 1024, 2)} MB)" if MIN_IMAGE_SIZE_KB > 0 else "Configured min image limit: None")
+    logging.info(f"Configured min video limit: {MIN_VIDEO_SIZE_KB} KB ({round(MIN_VIDEO_SIZE_KB / 1024, 2)} MB)" if MIN_VIDEO_SIZE_KB > 0 else "Configured min video limit: None")
     logging.info(f"Images enabled: {ENABLE_IMAGES}")
     logging.info(f"Videos enabled: {ENABLE_VIDEOS}")
     logging.info(f"Llama Guard Moderation: {'Enabled' if LLAMAGUARD_API_URL else 'Disabled'}")

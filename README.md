@@ -20,7 +20,7 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
 - **Full Metadata Extraction & Video Thumbnailing**: Extracts exact width, height, and duration dimensions from video documents, downloading high-resolution video thumbnails directly from Telegram and probing their parameters with `Pillow`.
 - **Automatic Blurhash Previews (MSC2448)**: Generates and attaches Blurhash placeholders (`xyz.amorgan.blurhash` inside the `info` metadata) to image and video events in-memory, allowing compatible Matrix clients to show beautiful, low-fidelity blurred placeholders while the actual media is loading.
 - **Caption Privacy Limit**: Discards original Telegram captions entirely—forwarding only the channel name/topic display name prefix and the media file name to avoid clutter.
-- **Automatic File Size Limiting**: Rejects media larger than the configured limit (e.g., 50MB) to preserve resources and server bandwidth.
+- **Automatic File Size Limiting**: Rejects media larger than `MAX_MEDIA_SIZE_MB` (e.g. 50MB) or smaller than configured minimum thresholds (`MIN_IMAGE_SIZE_KB` / `MIN_VIDEO_SIZE_KB`) before downloading, saving resources and server bandwidth.
 
 ---
 
@@ -47,6 +47,8 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `MATRIX_ROOM_ID` | Internal room ID of the destination room | `!abcde12345:matrix.org` |
 | `TG_CHANNELS` | Comma-separated list of target channels and topic filters | `MyChannel, -1001234567890:42, @MyChannel` |
 | `MAX_MEDIA_SIZE_MB` | Maximum size in MB to download and bridge | `80` (Default: `50`) |
+| `MIN_IMAGE_SIZE_KB` | Minimum file size in KB for images to be forwarded | `100` (Default: `0` / Disabled) |
+| `MIN_VIDEO_SIZE_KB` | Minimum file size in KB for videos to be forwarded (accepts `MIN_VIDEO_SIZE_MB`) | `1024` (Default: `0` / Disabled) |
 | `ENABLE_IMAGES` | Set to `false` to disable bridging of images | `true` (Default: `true`) |
 | `ENABLE_VIDEOS` | Set to `false` to disable bridging of videos | `true` (Default: `true`) |
 | `LLAMAGUARD_API_URL` | Base URL of an OpenAI-compatible Vision API for Llama Guard checks | `http://192.168.1.100:8000/v1` (Default: `None`/Disabled) |

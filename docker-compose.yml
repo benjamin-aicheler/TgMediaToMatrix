@@ -16,6 +16,8 @@ services:
       - MATRIX_ROOM_ID=
       - TG_CHANNELS=
       - MAX_MEDIA_SIZE_MB=80
+      - MIN_IMAGE_SIZE_KB=0
+      - MIN_VIDEO_SIZE_KB=0
       - ENABLE_IMAGES=true
       - ENABLE_VIDEOS=true
       - LLAMAGUARD_API_URL=
