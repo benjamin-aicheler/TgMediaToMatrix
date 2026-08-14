@@ -47,6 +47,7 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `MATRIX_ACCESS_TOKEN` | Access token for the Matrix account | `syt_dW...` |
 | `MATRIX_ROOM_ID` | Internal room ID of the destination room | `!abcde12345:matrix.org` |
 | `ADMIN_MATRIX_USER_ID` | Authorized Matrix user ID for dynamic chat commands | `@admin:matrix.org` (Default: `None` / Disabled) |
+| `ALLOW_NON_ADMIN_STOP` | Set to `true` to allow non-admin users to issue `stop` and `disable` commands | `false` (Default: `false`) |
 | `TG_CHANNELS` | Comma-separated list of target channels and topic filters | `MyChannel, -1001234567890:42, @MyChannel` |
 | `MAX_MEDIA_SIZE_MB` | Maximum size in MB to download and bridge | `80` (Default: `50`) |
 | `MIN_IMAGE_SIZE_KB` | Minimum file size in KB for images to be forwarded | `100` (Default: `0` / Disabled) |

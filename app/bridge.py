@@ -35,6 +35,7 @@ try:
     MATRIX_ACCESS_TOKEN = get_env_or_raise("MATRIX_ACCESS_TOKEN")
     MATRIX_ROOM_ID = get_env_or_raise("MATRIX_ROOM_ID")
     ADMIN_MATRIX_USER_ID = os.environ.get("ADMIN_MATRIX_USER_ID", "").strip() or None
+    ALLOW_NON_ADMIN_STOP = get_env_bool("ALLOW_NON_ADMIN_STOP", False)
 
     MAX_MEDIA_SIZE_MB = int(os.environ.get("MAX_MEDIA_SIZE_MB", 50))
     MAX_MEDIA_SIZE_BYTES = MAX_MEDIA_SIZE_MB * 1024 * 1024
@@ -684,10 +685,10 @@ async def send_matrix_notice(room_id: str, plain_text: str, html_text: str):
 
 
 async def on_matrix_message(room, event: RoomMessageText):
-    """Matrix command handler for admin user to toggle image/video bridging dynamically"""
+    """Matrix command handler for admin/room users to toggle image/video bridging dynamically."""
     global ENABLE_IMAGES, ENABLE_VIDEOS
 
-    if not ADMIN_MATRIX_USER_ID:
+    if not (ADMIN_MATRIX_USER_ID or ALLOW_NON_ADMIN_STOP):
         return
 
     # Ignore old messages sent before startup to prevent re-triggering historical commands
@@ -698,29 +699,32 @@ async def on_matrix_message(room, event: RoomMessageText):
     if not body.lower().startswith("!tmmb"):
         return
 
-    # Check sender authorization and log unauthorized command attempts from invalid senders
-    if event.sender != ADMIN_MATRIX_USER_ID:
+    is_admin = bool(ADMIN_MATRIX_USER_ID and event.sender == ADMIN_MATRIX_USER_ID)
+    is_stop_allowed = is_admin or ALLOW_NON_ADMIN_STOP
+
+    # Check authorization to issue commands
+    if not is_stop_allowed:
         logging.warning(f"[{room.room_id}] Unauthorized command attempt by invalid sender '{event.sender}': '{body}'")
         return
 
-    logging.info(f"[{room.room_id}] Command received from admin '{event.sender}': '{body}'")
+    logging.info(f"[{room.room_id}] Command received from user '{event.sender}': '{body}'")
 
     parts = body.split()
     if len(parts) == 1 or parts[1].lower() in ("help", "-h", "--help"):
         help_plain = (
             "[TgMediaToMatrix] Command Usage:\n"
-            "- !tmmb start : Enable both image and video bridging\n"
+            "- !tmmb start : Enable both image and video bridging (Admin only)\n"
             "- !tmmb stop : Disable both image and video bridging\n"
-            "- !tmmb image enable/disable : Enable or disable image bridging\n"
-            "- !tmmb video enable/disable : Enable or disable video bridging\n"
+            "- !tmmb image enable/disable : Enable (Admin only) or disable image bridging\n"
+            "- !tmmb video enable/disable : Enable (Admin only) or disable video bridging\n"
             "- !tmmb status : View current bridging status"
         )
         help_html = (
             "<strong>[TgMediaToMatrix] Command Usage:</strong><br/>"
-            "• <code>!tmmb start</code> : Enable both image and video bridging<br/>"
+            "• <code>!tmmb start</code> : Enable both image and video bridging <em>(Admin only)</em><br/>"
             "• <code>!tmmb stop</code> : Disable both image and video bridging<br/>"
-            "• <code>!tmmb image enable/disable</code> : Enable or disable image bridging<br/>"
-            "• <code>!tmmb video enable/disable</code> : Enable or disable video bridging<br/>"
+            "• <code>!tmmb image enable/disable</code> : Enable <em>(Admin only)</em> or disable image bridging<br/>"
+            "• <code>!tmmb video enable/disable</code> : Enable <em>(Admin only)</em> or disable video bridging<br/>"
             "• <code>!tmmb status</code> : View current bridging status"
         )
         await send_matrix_notice(room.room_id, help_plain, help_html)
@@ -728,24 +732,34 @@ async def on_matrix_message(room, event: RoomMessageText):
 
     subcmd = parts[1].lower()
 
+    # START / ENABLE (Both) -> Requires Admin
     if subcmd in ("start", "enable") and len(parts) == 2:
+        if not is_admin:
+            logging.warning(f"[{room.room_id}] Unauthorized start attempt by non-admin '{event.sender}': '{body}'")
+            notice_plain = "[TgMediaToMatrix] Only the configured admin user can start/enable media bridging."
+            notice_html = "<strong>[TgMediaToMatrix]</strong> Only the configured admin user can start/enable media bridging."
+            await send_matrix_notice(room.room_id, notice_plain, notice_html)
+            return
+
         ENABLE_IMAGES = True
         ENABLE_VIDEOS = True
-        logging.info(f"[{room.room_id}] Admin '{event.sender}' STARTED (ENABLED) both image and video bridging.")
+        logging.info(f"[{room.room_id}] User '{event.sender}' STARTED (ENABLED) both image and video bridging.")
         msg_plain = "[TgMediaToMatrix] Both image and video bridging have been STARTED (ENABLED)."
         msg_html = "<strong>[TgMediaToMatrix]</strong> Both image and video bridging have been <code>STARTED</code> (ENABLED)."
         await send_matrix_notice(room.room_id, msg_plain, msg_html)
         return
 
+    # STOP / DISABLE (Both) -> Admin or ALLOW_NON_ADMIN_STOP
     if subcmd in ("stop", "disable") and len(parts) == 2:
         ENABLE_IMAGES = False
         ENABLE_VIDEOS = False
-        logging.info(f"[{room.room_id}] Admin '{event.sender}' STOPPED (DISABLED) both image and video bridging.")
+        logging.info(f"[{room.room_id}] User '{event.sender}' STOPPED (DISABLED) both image and video bridging.")
         msg_plain = "[TgMediaToMatrix] Both image and video bridging have been STOPPED (DISABLED)."
         msg_html = "<strong>[TgMediaToMatrix]</strong> Both image and video bridging have been <code>STOPPED</code> (DISABLED)."
         await send_matrix_notice(room.room_id, msg_plain, msg_html)
         return
 
+    # STATUS -> Admin or ALLOW_NON_ADMIN_STOP
     if subcmd == "status":
         status_plain = (
             f"[TgMediaToMatrix] Current Status:\n"
@@ -760,17 +774,25 @@ async def on_matrix_message(room, event: RoomMessageText):
         await send_matrix_notice(room.room_id, status_plain, status_html)
         return
 
+    # IMAGE COMMANDS
     if len(parts) >= 3 and subcmd in ("image", "images"):
         action = parts[2].lower()
         if action in ("enable", "on", "true", "1"):
+            if not is_admin:
+                logging.warning(f"[{room.room_id}] Unauthorized image enable attempt by non-admin '{event.sender}': '{body}'")
+                notice_plain = "[TgMediaToMatrix] Only the configured admin user can enable image bridging."
+                notice_html = "<strong>[TgMediaToMatrix]</strong> Only the configured admin user can enable image bridging."
+                await send_matrix_notice(room.room_id, notice_plain, notice_html)
+                return
+
             ENABLE_IMAGES = True
-            logging.info(f"[{room.room_id}] Admin '{event.sender}' ENABLED image bridging.")
+            logging.info(f"[{room.room_id}] User '{event.sender}' ENABLED image bridging.")
             msg_plain = "[TgMediaToMatrix] Image bridging has been ENABLED."
             msg_html = "<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>ENABLED</code>."
             await send_matrix_notice(room.room_id, msg_plain, msg_html)
         elif action in ("disable", "off", "false", "0"):
             ENABLE_IMAGES = False
-            logging.info(f"[{room.room_id}] Admin '{event.sender}' DISABLED image bridging.")
+            logging.info(f"[{room.room_id}] User '{event.sender}' DISABLED image bridging.")
             msg_plain = "[TgMediaToMatrix] Image bridging has been DISABLED."
             msg_html = "<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>DISABLED</code>."
             await send_matrix_notice(room.room_id, msg_plain, msg_html)
@@ -780,17 +802,25 @@ async def on_matrix_message(room, event: RoomMessageText):
             await send_matrix_notice(room.room_id, invalid_plain, invalid_html)
         return
 
+    # VIDEO COMMANDS
     if len(parts) >= 3 and subcmd in ("video", "videos"):
         action = parts[2].lower()
         if action in ("enable", "on", "true", "1"):
+            if not is_admin:
+                logging.warning(f"[{room.room_id}] Unauthorized video enable attempt by non-admin '{event.sender}': '{body}'")
+                notice_plain = "[TgMediaToMatrix] Only the configured admin user can enable video bridging."
+                notice_html = "<strong>[TgMediaToMatrix]</strong> Only the configured admin user can enable video bridging."
+                await send_matrix_notice(room.room_id, notice_plain, notice_html)
+                return
+
             ENABLE_VIDEOS = True
-            logging.info(f"[{room.room_id}] Admin '{event.sender}' ENABLED video bridging.")
+            logging.info(f"[{room.room_id}] User '{event.sender}' ENABLED video bridging.")
             msg_plain = "[TgMediaToMatrix] Video bridging has been ENABLED."
             msg_html = "<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>ENABLED</code>."
             await send_matrix_notice(room.room_id, msg_plain, msg_html)
         elif action in ("disable", "off", "false", "0"):
             ENABLE_VIDEOS = False
-            logging.info(f"[{room.room_id}] Admin '{event.sender}' DISABLED video bridging.")
+            logging.info(f"[{room.room_id}] User '{event.sender}' DISABLED video bridging.")
             msg_plain = "[TgMediaToMatrix] Video bridging has been DISABLED."
             msg_html = "<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>DISABLED</code>."
             await send_matrix_notice(room.room_id, msg_plain, msg_html)
@@ -1014,32 +1044,17 @@ async def master_handler(event):
 
     # Check for topic / thread details (subchannels in forums)
     topic_id = None
-    r = event.message.reply_to
-    if r and getattr(r, 'forum_topic', False):
-        topic_id = r.reply_to_top_id if r.reply_to_top_id is not None else r.reply_to_msg_id
+    if hasattr(event.message, 'reply_to') and event.message.reply_to:
+        if hasattr(event.message.reply_to, 'forum_topic') and event.message.reply_to.forum_topic:
+            topic_id = getattr(event.message.reply_to, 'reply_to_msg_id', None)
 
-    # Check if we should filter by topic
-    chat_id = event.chat_id
-    chat_username = event.chat.username if event.chat else None
-    chat_username_lower = chat_username.lower() if chat_username else None
+    # Validate channel / topic filter match
+    if not is_channel_and_topic_allowed(event.chat_id, event.chat, topic_id):
+        return
 
-    allowed_topics = None
-    # If the channel itself was configured without any topic filter, allow all topics.
-    if chat_id in TG_UNFILTERED_CHANNELS or (chat_username_lower and chat_username_lower in TG_UNFILTERED_CHANNELS):
-        pass
-    else:
-        if chat_id in TG_TOPIC_FILTERS:
-            allowed_topics = TG_TOPIC_FILTERS[chat_id]
-        elif chat_username_lower and chat_username_lower in TG_TOPIC_FILTERS:
-            allowed_topics = TG_TOPIC_FILTERS[chat_username_lower]
-
-    if allowed_topics is not None:
-        if topic_id not in allowed_topics:
-            return
-
-    # Resolve channel name and optional topic name
+    # Extract clean display name for channel and topic
     channel_name = str(event.chat_id)
-    if event.chat:
+    if hasattr(event, 'chat') and event.chat:
         if hasattr(event.chat, 'title') and event.chat.title:
             channel_name = event.chat.title
         elif hasattr(event.chat, 'username') and event.chat.username:
@@ -1109,12 +1124,12 @@ async def main():
     logging.info(f"Videos enabled: {ENABLE_VIDEOS}")
 
     matrix_sync_task = None
-    if ADMIN_MATRIX_USER_ID:
-        logging.info(f"Admin Matrix user command listener active for: {ADMIN_MATRIX_USER_ID}")
+    if ADMIN_MATRIX_USER_ID or ALLOW_NON_ADMIN_STOP:
+        logging.info(f"Matrix command listener active (Admin User: {ADMIN_MATRIX_USER_ID or 'None'}, Allow Non-Admin Stop: {ALLOW_NON_ADMIN_STOP})")
         matrix_client.add_event_callback(on_matrix_message, RoomMessageText)
         matrix_sync_task = asyncio.create_task(matrix_client.sync_forever(timeout=30000, full_state=False))
     else:
-        logging.info("Admin Matrix user (ADMIN_MATRIX_USER_ID) not configured. Dynamic chat commands disabled.")
+        logging.info("Admin Matrix user (ADMIN_MATRIX_USER_ID) and ALLOW_NON_ADMIN_STOP not configured. Dynamic chat commands disabled.")
 
     logging.info(f"Llama Guard Moderation: {'Enabled' if LLAMAGUARD_API_URL else 'Disabled'}")
     if LLAMAGUARD_API_URL:
