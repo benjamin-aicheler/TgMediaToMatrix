@@ -14,6 +14,7 @@ services:
       - MATRIX_HOMESERVER=
       - MATRIX_ACCESS_TOKEN=
       - MATRIX_ROOM_ID=
+      - ADMIN_MATRIX_USER_ID=
       - TG_CHANNELS=
       - MAX_MEDIA_SIZE_MB=80
       - MIN_IMAGE_SIZE_KB=0

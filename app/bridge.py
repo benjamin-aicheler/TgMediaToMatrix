@@ -1,9 +1,10 @@
 import os
 import io
+import time
 import asyncio
 import logging
 from telethon import TelegramClient, events
-from nio import AsyncClient, UploadResponse, RoomSendResponse, RoomSendError
+from nio import AsyncClient, UploadResponse, RoomSendResponse, RoomSendError, RoomMessageText
 
 # Set up professional logging format
 logging.basicConfig(
@@ -11,6 +12,8 @@ logging.basicConfig(
     format='%(asctime)s - [%(levelname)s] - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+STARTUP_TIMESTAMP_MS = int(time.time() * 1000)
 
 # Load and validate environment variables
 def get_env_or_raise(key: str) -> str:
@@ -31,6 +34,7 @@ try:
     MATRIX_HOMESERVER = get_env_or_raise("MATRIX_HOMESERVER").rstrip('/')
     MATRIX_ACCESS_TOKEN = get_env_or_raise("MATRIX_ACCESS_TOKEN")
     MATRIX_ROOM_ID = get_env_or_raise("MATRIX_ROOM_ID")
+    ADMIN_MATRIX_USER_ID = os.environ.get("ADMIN_MATRIX_USER_ID", "").strip() or None
 
     MAX_MEDIA_SIZE_MB = int(os.environ.get("MAX_MEDIA_SIZE_MB", 50))
     MAX_MEDIA_SIZE_BYTES = MAX_MEDIA_SIZE_MB * 1024 * 1024
@@ -660,6 +664,123 @@ tg_client = TelegramClient(
 matrix_client = AsyncClient(MATRIX_HOMESERVER)
 matrix_client.access_token = MATRIX_ACCESS_TOKEN
 
+
+async def send_matrix_notice(room_id: str, plain_text: str, html_text: str):
+    """Send a status/command response notice back to the Matrix room"""
+    try:
+        content = {
+            "msgtype": "m.notice",
+            "body": plain_text,
+            "format": "org.matrix.custom.html",
+            "formatted_body": html_text
+        }
+        await matrix_client.room_send(
+            room_id=room_id,
+            message_type="m.room.message",
+            content=content
+        )
+    except Exception as e:
+        logging.error(f"Failed to send Matrix command response notice: {e}")
+
+
+async def on_matrix_message(room, event: RoomMessageText):
+    """Matrix command handler for admin user to toggle image/video bridging dynamically"""
+    global ENABLE_IMAGES, ENABLE_VIDEOS
+
+    if not ADMIN_MATRIX_USER_ID:
+        return
+
+    # Ignore old messages sent before startup to prevent re-triggering historical commands
+    if hasattr(event, 'server_timestamp') and event.server_timestamp and event.server_timestamp < STARTUP_TIMESTAMP_MS:
+        return
+
+    # Only authorize commands sent by the configured admin user
+    if event.sender != ADMIN_MATRIX_USER_ID:
+        return
+
+    body = event.body.strip()
+    if not body.lower().startswith("!tmmmb"):
+        return
+
+    logging.info(f"[{room.room_id}] Command received from admin '{event.sender}': '{body}'")
+
+    parts = body.split()
+    if len(parts) == 1 or parts[1].lower() in ("help", "-h", "--help"):
+        help_plain = (
+            "[TgMediaToMatrix] Command Usage:\n"
+            "- !tmmmb image enable/disable : Enable or disable image bridging\n"
+            "- !tmmmb video enable/disable : Enable or disable video bridging\n"
+            "- !tmmmb status : View current bridging status"
+        )
+        help_html = (
+            "<strong>[TgMediaToMatrix] Command Usage:</strong><br/>"
+            "• <code>!tmmmb image enable/disable</code> : Enable or disable image bridging<br/>"
+            "• <code>!tmmmb video enable/disable</code> : Enable or disable video bridging<br/>"
+            "• <code>!tmmmb status</code> : View current bridging status"
+        )
+        await send_matrix_notice(room.room_id, help_plain, help_html)
+        return
+
+    subcmd = parts[1].lower()
+
+    if subcmd == "status":
+        status_plain = (
+            f"[TgMediaToMatrix] Current Status:\n"
+            f"- Images: {'ENABLED' if ENABLE_IMAGES else 'DISABLED'}\n"
+            f"- Videos: {'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}"
+        )
+        status_html = (
+            f"<strong>[TgMediaToMatrix] Current Status:</strong><br/>"
+            f"• Images: <code>{'ENABLED' if ENABLE_IMAGES else 'DISABLED'}</code><br/>"
+            f"• Videos: <code>{'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}</code>"
+        )
+        await send_matrix_notice(room.room_id, status_plain, status_html)
+        return
+
+    if len(parts) >= 3 and subcmd in ("image", "images"):
+        action = parts[2].lower()
+        if action in ("enable", "on", "true", "1"):
+            ENABLE_IMAGES = True
+            logging.info(f"[{room.room_id}] Admin '{event.sender}' ENABLED image bridging.")
+            msg_plain = "[TgMediaToMatrix] Image bridging has been ENABLED."
+            msg_html = "<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>ENABLED</code>."
+            await send_matrix_notice(room.room_id, msg_plain, msg_html)
+        elif action in ("disable", "off", "false", "0"):
+            ENABLE_IMAGES = False
+            logging.info(f"[{room.room_id}] Admin '{event.sender}' DISABLED image bridging.")
+            msg_plain = "[TgMediaToMatrix] Image bridging has been DISABLED."
+            msg_html = "<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>DISABLED</code>."
+            await send_matrix_notice(room.room_id, msg_plain, msg_html)
+        else:
+            invalid_plain = f"[TgMediaToMatrix] Unknown action '{action}'. Use 'enable' or 'disable'."
+            invalid_html = f"<strong>[TgMediaToMatrix]</strong> Unknown action <code>{action}</code>. Use <code>enable</code> or <code>disable</code>."
+            await send_matrix_notice(room.room_id, invalid_plain, invalid_html)
+        return
+
+    if len(parts) >= 3 and subcmd in ("video", "videos"):
+        action = parts[2].lower()
+        if action in ("enable", "on", "true", "1"):
+            ENABLE_VIDEOS = True
+            logging.info(f"[{room.room_id}] Admin '{event.sender}' ENABLED video bridging.")
+            msg_plain = "[TgMediaToMatrix] Video bridging has been ENABLED."
+            msg_html = "<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>ENABLED</code>."
+            await send_matrix_notice(room.room_id, msg_plain, msg_html)
+        elif action in ("disable", "off", "false", "0"):
+            ENABLE_VIDEOS = False
+            logging.info(f"[{room.room_id}] Admin '{event.sender}' DISABLED video bridging.")
+            msg_plain = "[TgMediaToMatrix] Video bridging has been DISABLED."
+            msg_html = "<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>DISABLED</code>."
+            await send_matrix_notice(room.room_id, msg_plain, msg_html)
+        else:
+            invalid_plain = f"[TgMediaToMatrix] Unknown action '{action}'. Use 'enable' or 'disable'."
+            invalid_html = f"<strong>[TgMediaToMatrix]</strong> Unknown action <code>{action}</code>. Use <code>enable</code> or <code>disable</code>."
+            await send_matrix_notice(room.room_id, invalid_plain, invalid_html)
+        return
+
+    unknown_plain = f"[TgMediaToMatrix] Unknown command '{body}'. Type '!tmmmb help' for usage."
+    unknown_html = f"<strong>[TgMediaToMatrix]</strong> Unknown command <code>{body}</code>. Type <code>!tmmmb help</code> for usage."
+    await send_matrix_notice(room.room_id, unknown_plain, unknown_html)
+
 async def process_and_upload_media(message, source_chat, channel_name):
     """Process a single Telegram message and stream the media to Matrix"""
     mime_type = message.file.mime_type if message.file else None
@@ -963,6 +1084,15 @@ async def main():
     logging.info(f"Configured min video limit: {MIN_VIDEO_SIZE_KB} KB ({round(MIN_VIDEO_SIZE_KB / 1024, 2)} MB)" if MIN_VIDEO_SIZE_KB > 0 else "Configured min video limit: None")
     logging.info(f"Images enabled: {ENABLE_IMAGES}")
     logging.info(f"Videos enabled: {ENABLE_VIDEOS}")
+
+    matrix_sync_task = None
+    if ADMIN_MATRIX_USER_ID:
+        logging.info(f"Admin Matrix user command listener active for: {ADMIN_MATRIX_USER_ID}")
+        matrix_client.add_event_callback(on_matrix_message, RoomMessageText)
+        matrix_sync_task = asyncio.create_task(matrix_client.sync_forever(timeout=30000, full_state=False))
+    else:
+        logging.info("Admin Matrix user (ADMIN_MATRIX_USER_ID) not configured. Dynamic chat commands disabled.")
+
     logging.info(f"Llama Guard Moderation: {'Enabled' if LLAMAGUARD_API_URL else 'Disabled'}")
     if LLAMAGUARD_API_URL:
         logging.info(f"Llama Guard Model: {LLAMAGUARD_MODEL_NAME}")
@@ -972,6 +1102,8 @@ async def main():
     try:
         await tg_client.run_until_disconnected()
     finally:
+        if matrix_sync_task and not matrix_sync_task.done():
+            matrix_sync_task.cancel()
         await matrix_client.close()
 
 if __name__ == '__main__':

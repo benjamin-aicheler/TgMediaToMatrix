@@ -15,6 +15,7 @@ This file contains development rules and architectural guidelines for AI agents 
 - Prefer `matrix-nio` native library functions over custom HTTP requests.
 - Use `matrix_client.upload()` with in-memory `io.BytesIO` streams rather than writing media to disk or utilizing external libraries (e.g., `httpx`) unless specifically requested.
 - Maintain a single, globally-reused `AsyncClient` instance for room communication and media uploads. Ensure it is closed gracefully when the main program stops.
+- Interactive Matrix commands (`!tmmmb`) must be authorized strictly against `ADMIN_MATRIX_USER_ID` and ignore historical events received prior to startup.
 
 ---
 

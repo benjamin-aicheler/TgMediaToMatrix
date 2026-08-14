@@ -21,6 +21,7 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
 - **Automatic Blurhash Previews (MSC2448)**: Generates and attaches Blurhash placeholders (`xyz.amorgan.blurhash` inside the `info` metadata) to image and video events in-memory, allowing compatible Matrix clients to show beautiful, low-fidelity blurred placeholders while the actual media is loading.
 - **Caption Privacy Limit**: Discards original Telegram captions entirely—forwarding only the channel name/topic display name prefix and the media file name to avoid clutter.
 - **Automatic File Size Limiting**: Rejects media larger than `MAX_MEDIA_SIZE_MB` (e.g. 50MB) or smaller than configured minimum thresholds (`MIN_IMAGE_SIZE_KB` / `MIN_VIDEO_SIZE_KB`) before downloading, saving resources and server bandwidth.
+- **Dynamic Interactive Chat Commands**: When `ADMIN_MATRIX_USER_ID` is set, the authorized admin user can send `!tmmmb` commands in Matrix to query status or dynamically toggle image and video bridging on the fly.
 
 ---
 
@@ -45,6 +46,7 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `MATRIX_HOMESERVER` | Your Matrix Homeserver URL | `https://matrix.org` |
 | `MATRIX_ACCESS_TOKEN` | Access token for the Matrix account | `syt_dW...` |
 | `MATRIX_ROOM_ID` | Internal room ID of the destination room | `!abcde12345:matrix.org` |
+| `ADMIN_MATRIX_USER_ID` | Authorized Matrix user ID for dynamic chat commands | `@admin:matrix.org` (Default: `None` / Disabled) |
 | `TG_CHANNELS` | Comma-separated list of target channels and topic filters | `MyChannel, -1001234567890:42, @MyChannel` |
 | `MAX_MEDIA_SIZE_MB` | Maximum size in MB to download and bridge | `80` (Default: `50`) |
 | `MIN_IMAGE_SIZE_KB` | Minimum file size in KB for images to be forwarded | `100` (Default: `0` / Disabled) |
@@ -58,6 +60,19 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `LLAMAGUARD_REQUIRE_CHECKS` | Comma-separated list of required safety categories (whitelist mode). If set, safe content and any content not matching these categories is blocked. | `S12` (Default: empty / disable whitelist mode) |
 | `LLAMAGUARD_VIDEO_FRAMES` | Number of frames to extract and check concurrently from each video | `5` (Default: `5`) |
 | `LLAMAGUARD_RANDOM_FRAMES` | Extract frames randomly throughout the video duration instead of evenly spaced. Set to `false` for evenly spaced selection. | `true` (Default: `true`) |
+
+---
+
+## Dynamic Chat Commands (`!tmmmb`)
+
+When `ADMIN_MATRIX_USER_ID` is configured, the bridge listens for real-time control commands issued by that specific Matrix user ID in the Matrix room:
+
+| Command | Description |
+| :--- | :--- |
+| `!tmmmb image enable` / `disable` | Dynamically turn image bridging on or off in memory until container restart or next command |
+| `!tmmmb video enable` / `disable` | Dynamically turn video bridging on or off in memory until container restart or next command |
+| `!tmmmb status` | View the current runtime enablement state of image and video bridging |
+| `!tmmmb help` | Show command usage and instructions |
 
 
 ### Specifying Channels & Topics in `TG_CHANNELS`
