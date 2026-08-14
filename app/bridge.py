@@ -695,7 +695,7 @@ async def on_matrix_message(room, event: RoomMessageText):
         return
 
     body = event.body.strip()
-    if not body.lower().startswith("!tmmmb"):
+    if not body.lower().startswith("!tmmb"):
         return
 
     # Check sender authorization and log unauthorized command attempts from invalid senders
@@ -709,15 +709,15 @@ async def on_matrix_message(room, event: RoomMessageText):
     if len(parts) == 1 or parts[1].lower() in ("help", "-h", "--help"):
         help_plain = (
             "[TgMediaToMatrix] Command Usage:\n"
-            "- !tmmmb image enable/disable : Enable or disable image bridging\n"
-            "- !tmmmb video enable/disable : Enable or disable video bridging\n"
-            "- !tmmmb status : View current bridging status"
+            "- !tmmb image enable/disable : Enable or disable image bridging\n"
+            "- !tmmb video enable/disable : Enable or disable video bridging\n"
+            "- !tmmb status : View current bridging status"
         )
         help_html = (
             "<strong>[TgMediaToMatrix] Command Usage:</strong><br/>"
-            "• <code>!tmmmb image enable/disable</code> : Enable or disable image bridging<br/>"
-            "• <code>!tmmmb video enable/disable</code> : Enable or disable video bridging<br/>"
-            "• <code>!tmmmb status</code> : View current bridging status"
+            "• <code>!tmmb image enable/disable</code> : Enable or disable image bridging<br/>"
+            "• <code>!tmmb video enable/disable</code> : Enable or disable video bridging<br/>"
+            "• <code>!tmmb status</code> : View current bridging status"
         )
         await send_matrix_notice(room.room_id, help_plain, help_html)
         return
@@ -778,8 +778,8 @@ async def on_matrix_message(room, event: RoomMessageText):
             await send_matrix_notice(room.room_id, invalid_plain, invalid_html)
         return
 
-    unknown_plain = f"[TgMediaToMatrix] Unknown command '{body}'. Type '!tmmmb help' for usage."
-    unknown_html = f"<strong>[TgMediaToMatrix]</strong> Unknown command <code>{body}</code>. Type <code>!tmmmb help</code> for usage."
+    unknown_plain = f"[TgMediaToMatrix] Unknown command '{body}'. Type '!tmmb help' for usage."
+    unknown_html = f"<strong>[TgMediaToMatrix]</strong> Unknown command <code>{body}</code>. Type <code>!tmmb help</code> for usage."
     await send_matrix_notice(room.room_id, unknown_plain, unknown_html)
 
 async def process_and_upload_media(message, source_chat, channel_name):
