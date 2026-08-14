@@ -694,12 +694,13 @@ async def on_matrix_message(room, event: RoomMessageText):
     if hasattr(event, 'server_timestamp') and event.server_timestamp and event.server_timestamp < STARTUP_TIMESTAMP_MS:
         return
 
-    # Only authorize commands sent by the configured admin user
-    if event.sender != ADMIN_MATRIX_USER_ID:
-        return
-
     body = event.body.strip()
     if not body.lower().startswith("!tmmmb"):
+        return
+
+    # Check sender authorization and log unauthorized command attempts from invalid senders
+    if event.sender != ADMIN_MATRIX_USER_ID:
+        logging.warning(f"[{room.room_id}] Unauthorized command attempt by invalid sender '{event.sender}': '{body}'")
         return
 
     logging.info(f"[{room.room_id}] Command received from admin '{event.sender}': '{body}'")
