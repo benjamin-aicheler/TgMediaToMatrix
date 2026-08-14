@@ -709,12 +709,16 @@ async def on_matrix_message(room, event: RoomMessageText):
     if len(parts) == 1 or parts[1].lower() in ("help", "-h", "--help"):
         help_plain = (
             "[TgMediaToMatrix] Command Usage:\n"
+            "- !tmmb start : Enable both image and video bridging\n"
+            "- !tmmb stop : Disable both image and video bridging\n"
             "- !tmmb image enable/disable : Enable or disable image bridging\n"
             "- !tmmb video enable/disable : Enable or disable video bridging\n"
             "- !tmmb status : View current bridging status"
         )
         help_html = (
             "<strong>[TgMediaToMatrix] Command Usage:</strong><br/>"
+            "• <code>!tmmb start</code> : Enable both image and video bridging<br/>"
+            "• <code>!tmmb stop</code> : Disable both image and video bridging<br/>"
             "• <code>!tmmb image enable/disable</code> : Enable or disable image bridging<br/>"
             "• <code>!tmmb video enable/disable</code> : Enable or disable video bridging<br/>"
             "• <code>!tmmb status</code> : View current bridging status"
@@ -723,6 +727,24 @@ async def on_matrix_message(room, event: RoomMessageText):
         return
 
     subcmd = parts[1].lower()
+
+    if subcmd in ("start", "enable") and len(parts) == 2:
+        ENABLE_IMAGES = True
+        ENABLE_VIDEOS = True
+        logging.info(f"[{room.room_id}] Admin '{event.sender}' STARTED (ENABLED) both image and video bridging.")
+        msg_plain = "[TgMediaToMatrix] Both image and video bridging have been STARTED (ENABLED)."
+        msg_html = "<strong>[TgMediaToMatrix]</strong> Both image and video bridging have been <code>STARTED</code> (ENABLED)."
+        await send_matrix_notice(room.room_id, msg_plain, msg_html)
+        return
+
+    if subcmd in ("stop", "disable") and len(parts) == 2:
+        ENABLE_IMAGES = False
+        ENABLE_VIDEOS = False
+        logging.info(f"[{room.room_id}] Admin '{event.sender}' STOPPED (DISABLED) both image and video bridging.")
+        msg_plain = "[TgMediaToMatrix] Both image and video bridging have been STOPPED (DISABLED)."
+        msg_html = "<strong>[TgMediaToMatrix]</strong> Both image and video bridging have been <code>STOPPED</code> (DISABLED)."
+        await send_matrix_notice(room.room_id, msg_plain, msg_html)
+        return
 
     if subcmd == "status":
         status_plain = (

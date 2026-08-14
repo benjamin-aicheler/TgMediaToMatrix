@@ -69,6 +69,8 @@ When `ADMIN_MATRIX_USER_ID` is configured, the bridge listens for real-time cont
 
 | Command | Description |
 | :--- | :--- |
+| `!tmmb start` | Dynamically enable both image and video bridging simultaneously |
+| `!tmmb stop` | Dynamically disable both image and video bridging simultaneously |
 | `!tmmb image enable` / `disable` | Dynamically turn image bridging on or off in memory until container restart or next command |
 | `!tmmb video enable` / `disable` | Dynamically turn video bridging on or off in memory until container restart or next command |
 | `!tmmb status` | View the current runtime enablement state of image and video bridging |
