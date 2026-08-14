@@ -15,7 +15,8 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
 - **In-Memory Streaming**: Avoids writing files to disk; downloads and uploads media bytes directly through in-memory streams (`io.BytesIO`).
 - **Enhanced Client Compatibility**:
   - Populates standard `body`, `filename`, and `info.filename` metadata so both legacy and modern Matrix clients render the filename cleanly.
-  - Generates beautiful multi-line rich HTML captions (`formatted_body`) adhering to **MSC2530 (Media Captions)** so that clients render the source channel name prominently, followed by subtle inline media dimensions (e.g. `1920x1080`) and human-readable file sizes (`MB`/`KB`).
+  - Generates subtle inline captions (`formatted_body`) showing media dimensions (e.g. `1920x1080`) and human-readable file sizes (`MB`/`KB`) without cluttering the chat view.
+  - Attaches the source Telegram channel and topic name to a custom event property (`content.source`), allowing event inspection without cluttering chat messages.
 - **Dynamic In-Memory Image Thumbnailing**: Generates high-quality image thumbnails directly in-memory using Pillow (up to 800×800 bounding box with `LANCZOS` resampling), bypassing redundant network downloads from Telegram. If an image is already smaller than the target bounds, its original bytes and dimensions are returned immediately to avoid unnecessary re-encoding.
 - **Full Metadata Extraction & Video Thumbnailing**: Extracts exact width, height, and duration dimensions from video documents, downloading high-resolution video thumbnails directly from Telegram and probing their parameters with `Pillow`.
 - **Automatic Blurhash Previews (MSC2448)**: Generates and attaches Blurhash placeholders (`xyz.amorgan.blurhash` inside the `info` metadata) to image and video events in-memory, allowing compatible Matrix clients to show beautiful, low-fidelity blurred placeholders while the actual media is loading.

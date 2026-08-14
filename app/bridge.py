@@ -1021,11 +1021,8 @@ async def process_and_upload_media(message, source_chat, channel_name):
         else:
             meta_line = f"{size_str}"
 
-        body_text = f"Media from '{channel_name}'\n{meta_line}"
-        formatted_body_text = (
-            f"Media from '<strong>{channel_name}</strong>'<br/>"
-            f"<font color=\"#888888\"><small>{meta_line}</small></font>"
-        )
+        body_text = meta_line
+        formatted_body_text = f'<font color="#888888"><small>{meta_line}</small></font>'
 
         matrix_content = {
             "msgtype": msg_type,
@@ -1033,7 +1030,8 @@ async def process_and_upload_media(message, source_chat, channel_name):
             "url": content_uri,
             "filename": filename,
             "format": "org.matrix.custom.html",
-            "formatted_body": formatted_body_text
+            "formatted_body": formatted_body_text,
+            "source": channel_name
         }
         if blurhash_str:
             info_dict["xyz.amorgan.blurhash"] = blurhash_str
