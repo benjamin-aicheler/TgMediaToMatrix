@@ -155,6 +155,27 @@ except Exception as init_err:
 # Cache for already processed album IDs
 PROCESSED_ALBUMS = set()
 
+
+def is_channel_and_topic_allowed(chat_id, chat_entity, topic_id=None):
+    """Check if a given channel ID and topic ID match the configured filtering rules."""
+    chat_username = getattr(chat_entity, 'username', None) if chat_entity else None
+    chat_username_lower = chat_username.lower() if chat_username else None
+
+    # If the channel itself was configured without any topic filter, allow all topics.
+    if chat_id in TG_UNFILTERED_CHANNELS or (chat_username_lower and chat_username_lower in TG_UNFILTERED_CHANNELS):
+        return True
+
+    allowed_topics = None
+    if chat_id in TG_TOPIC_FILTERS:
+        allowed_topics = TG_TOPIC_FILTERS[chat_id]
+    elif chat_username_lower and chat_username_lower in TG_TOPIC_FILTERS:
+        allowed_topics = TG_TOPIC_FILTERS[chat_username_lower]
+
+    if allowed_topics is not None:
+        return topic_id in allowed_topics
+
+    return True
+
 # Cache for resolved topic names
 TOPIC_NAMES_CACHE = {}
 
