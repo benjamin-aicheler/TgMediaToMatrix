@@ -22,7 +22,7 @@ This file contains development rules and architectural guidelines for AI agents 
 ## 2. Configuration & Validation
 
 ### Startup Verification
-- Any configuration loaded from environment variables (e.g., `TG_API_ID`, `TG_CHANNELS`, `MATRIX_ROOM_ID`) must be validated at script startup.
+- Any configuration loaded from environment variables (e.g., `TG_API_ID`, `TG_CHANNELS`, `MATRIX_ROOM_IDS` / `MATRIX_ROOM_ID`) must be validated at script startup.
 - Do not let the program fail silently or with unclear tracebacks later in the process. Raise descriptive exceptions if any required variables are missing or empty.
 - Ensure that comma-separated values (like `TG_CHANNELS`) are correctly stripped of extra spaces, and empty elements (such as trailing commas) are ignored.
 

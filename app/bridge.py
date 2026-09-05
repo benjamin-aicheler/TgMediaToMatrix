@@ -33,7 +33,21 @@ try:
     TG_API_HASH = get_env_or_raise("TG_API_HASH")
     MATRIX_HOMESERVER = get_env_or_raise("MATRIX_HOMESERVER").rstrip('/')
     MATRIX_ACCESS_TOKEN = get_env_or_raise("MATRIX_ACCESS_TOKEN")
-    MATRIX_ROOM_ID = get_env_or_raise("MATRIX_ROOM_ID")
+
+    raw_room_ids = os.environ.get("MATRIX_ROOM_IDS", "").strip()
+    if raw_room_ids:
+        MATRIX_ROOM_IDS = [r.strip() for r in raw_room_ids.split(",") if r.strip()]
+        if not MATRIX_ROOM_IDS:
+            raise ValueError("MATRIX_ROOM_IDS was provided but contains no valid room IDs.")
+        if os.environ.get("MATRIX_ROOM_ID"):
+            logging.info("MATRIX_ROOM_IDS is set; deprecated MATRIX_ROOM_ID environment variable will be ignored.")
+    else:
+        legacy_room_id = os.environ.get("MATRIX_ROOM_ID", "").strip()
+        if not legacy_room_id:
+            raise ValueError("Missing required environment variable: MATRIX_ROOM_IDS (or deprecated MATRIX_ROOM_ID).")
+        MATRIX_ROOM_IDS = [legacy_room_id]
+
+    MATRIX_ROOM_ID = MATRIX_ROOM_IDS[0]  # Kept for backward compatibility
     ADMIN_MATRIX_USER_ID = os.environ.get("ADMIN_MATRIX_USER_ID", "").strip() or None
     ALLOW_NON_ADMIN_STOP = get_env_bool("ALLOW_NON_ADMIN_STOP", False)
 
@@ -712,6 +726,10 @@ async def on_matrix_message(room, event: RoomMessageText):
     if not (ADMIN_MATRIX_USER_ID or ALLOW_NON_ADMIN_STOP):
         return
 
+    # Only process commands sent from configured destination rooms
+    if room.room_id not in MATRIX_ROOM_IDS:
+        return
+
     # Ignore old messages sent before startup to prevent re-triggering historical commands
     if hasattr(event, 'server_timestamp') and event.server_timestamp and event.server_timestamp < STARTUP_TIMESTAMP_MS:
         return
@@ -1039,17 +1057,21 @@ async def process_and_upload_media(message, source_chat, channel_name):
         if info_dict:
             matrix_content["info"] = info_dict
 
-        send_response = await matrix_client.room_send(
-            room_id=MATRIX_ROOM_ID,
-            message_type="m.room.message",
-            content=matrix_content
-        )
-        if isinstance(send_response, RoomSendResponse):
-            logging.info(f"[{source_chat}] Event successfully posted in Matrix room (Event ID: {send_response.event_id})")
-        elif isinstance(send_response, RoomSendError):
-            logging.error(f"[{source_chat}] Failed to post event to Matrix room: {send_response.message} (status code: {send_response.status_code})")
-        else:
-            logging.error(f"[{source_chat}] Unknown response type when posting event to Matrix room: {send_response}")
+        for target_room_id in MATRIX_ROOM_IDS:
+            try:
+                send_response = await matrix_client.room_send(
+                    room_id=target_room_id,
+                    message_type="m.room.message",
+                    content=matrix_content
+                )
+                if isinstance(send_response, RoomSendResponse):
+                    logging.info(f"[{source_chat}] Event successfully posted in Matrix room '{target_room_id}' (Event ID: {send_response.event_id})")
+                elif isinstance(send_response, RoomSendError):
+                    logging.error(f"[{source_chat}] Failed to post event to Matrix room '{target_room_id}': {send_response.message} (status code: {send_response.status_code})")
+                else:
+                    logging.error(f"[{source_chat}] Unknown response type when posting event to Matrix room '{target_room_id}': {send_response}")
+            except Exception as room_err:
+                logging.error(f"[{source_chat}] Error sending event to Matrix room '{target_room_id}': {room_err}")
             
     except Exception as e:
         logging.error(f"[{source_chat}] General error during Matrix transfer of {filename}: {e}")
@@ -1136,6 +1158,7 @@ async def main():
     logging.info("Starting Telegram client...")
     await tg_client.start()
     logging.info(f"Bridge successfully started and active for channels: {TG_CHANNELS}")
+    logging.info(f"Target Matrix rooms: {MATRIX_ROOM_IDS}")
     logging.info(f"Configured max media limit: {MAX_MEDIA_SIZE_MB} MB")
     logging.info(f"Configured min image limit: {MIN_IMAGE_SIZE_KB} KB ({round(MIN_IMAGE_SIZE_KB / 1024, 2)} MB)" if MIN_IMAGE_SIZE_KB > 0 else "Configured min image limit: None")
     logging.info(f"Configured min video limit: {MIN_VIDEO_SIZE_KB} KB ({round(MIN_VIDEO_SIZE_KB / 1024, 2)} MB)" if MIN_VIDEO_SIZE_KB > 0 else "Configured min video limit: None")

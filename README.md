@@ -21,6 +21,7 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
 - **Full Metadata Extraction & Video Thumbnailing**: Extracts exact width, height, and duration dimensions from video documents, downloading high-resolution video thumbnails directly from Telegram and probing their parameters with `Pillow`.
 - **Automatic Blurhash Previews (MSC2448)**: Generates and attaches Blurhash placeholders (`xyz.amorgan.blurhash` inside the `info` metadata) to image and video events in-memory, allowing compatible Matrix clients to show beautiful, low-fidelity blurred placeholders while the actual media is loading.
 - **Caption Privacy Limit**: Discards original Telegram captions entirely—forwarding only the channel name/topic display name prefix and the media file name to avoid clutter.
+- **Multi-Room Forwarding (Single Upload)**: Forward media to multiple Matrix rooms without duplicate network traffic—media and thumbnails are uploaded to the homeserver only once and dispatched as lightweight events across all configured rooms.
 - **Automatic File Size Limiting**: Rejects media larger than `MAX_MEDIA_SIZE_MB` (e.g. 50MB) or smaller than configured minimum thresholds (`MIN_IMAGE_SIZE_KB` / `MIN_VIDEO_SIZE_KB`) before downloading, saving resources and server bandwidth.
 - **Dynamic Interactive Chat Commands**: When `ADMIN_MATRIX_USER_ID` is set, the authorized admin user can send `!tmmb` commands in Matrix to query status or dynamically toggle image and video bridging on the fly.
 
@@ -32,7 +33,7 @@ Before starting, you need:
 1. **Telegram API Credentials**: An `API_ID` and `API_HASH` from [my.telegram.org](https://my.telegram.org/).
 2. **Matrix User Account**: A dedicated user account on your Matrix homeserver.
 3. **Matrix Access Token**: An access token for that user (can be fetched from client settings such as Element under *All Settings* -> *Help & About* -> *Advanced* -> *Access Token*).
-4. **Matrix Room ID**: The internal room ID of the target channel/room where the media should be posted (e.g., `!abcde12345:matrix.org`).
+4. **Matrix Room IDs**: One or more internal room IDs where the media should be posted (e.g., `!abcde12345:matrix.org, !fghij67890:matrix.org`).
 
 ---
 
@@ -46,7 +47,8 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `TG_API_HASH` | Telegram API Hash | `abcdef0123456789abcdef0123456789` |
 | `MATRIX_HOMESERVER` | Your Matrix Homeserver URL | `https://matrix.org` |
 | `MATRIX_ACCESS_TOKEN` | Access token for the Matrix account | `syt_dW...` |
-| `MATRIX_ROOM_ID` | Internal room ID of the destination room | `!abcde12345:matrix.org` |
+| `MATRIX_ROOM_IDS` | Comma-separated internal room IDs of destination rooms | `!abcde12345:matrix.org, !fghij67890:matrix.org` |
+| `MATRIX_ROOM_ID` | *(Deprecated)* Single destination room ID. Ignored if `MATRIX_ROOM_IDS` is set. | `!abcde12345:matrix.org` |
 | `ADMIN_MATRIX_USER_ID` | Authorized Matrix user ID for dynamic chat commands | `@admin:matrix.org` (Default: `None` / Disabled) |
 | `ALLOW_NON_ADMIN_STOP` | Set to `true` to allow non-admin users to issue `stop` and `disable` commands | `false` (Default: `false`) |
 | `TG_CHANNELS` | Comma-separated list of target channels and topic filters | `MyChannel, -1001234567890:42, @MyChannel` |
