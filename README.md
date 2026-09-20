@@ -22,6 +22,10 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
 - **Automatic Blurhash Previews (MSC2448)**: Generates and attaches Blurhash placeholders (`xyz.amorgan.blurhash` inside the `info` metadata) to image and video events in-memory, allowing compatible Matrix clients to show beautiful, low-fidelity blurred placeholders while the actual media is loading.
 - **Caption Privacy Limit**: Discards original Telegram captions entirely—forwarding only the channel name/topic display name prefix and the media file name to avoid clutter.
 - **Multi-Room Forwarding (Single Upload)**: Forward media to multiple Matrix rooms without duplicate network traffic—media and thumbnails are uploaded to the homeserver only once and dispatched as lightweight events across all configured rooms.
+- **Duplicate Media Safety (Two-Tier Deduplication)**: Prevents duplicate media forwarding when the same photo or video is posted across multiple channels or reposted in the same channel. Features a two-tier in-memory cache:
+  - *Pre-Download Check*: Matches Telegram internal media IDs (`photo.id` / `document.id`) before download to conserve network bandwidth.
+  - *Post-Download Check*: Calculates an exact SHA-256 hash of downloaded bytes before Llama Guard analysis and Matrix uploading to catch separate manual uploads of the identical file.
+  - *Time & Memory Bounds*: Uses a bounded LRU/FIFO cache with automatic time-based expiry (default 15-minute window).
 - **Automatic File Size Limiting**: Rejects media larger than `MAX_MEDIA_SIZE_MB` (e.g. 50MB) or smaller than configured minimum thresholds (`MIN_IMAGE_SIZE_KB` / `MIN_VIDEO_SIZE_KB`) before downloading, saving resources and server bandwidth.
 - **Dynamic Interactive Chat Commands**: When `ADMIN_MATRIX_USER_ID` is set, the authorized admin user can send `!tmmb` commands in Matrix to query status or dynamically toggle image and video bridging on the fly.
 
@@ -57,6 +61,9 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `MIN_VIDEO_SIZE_KB` | Minimum file size in KB for videos to be forwarded (accepts `MIN_VIDEO_SIZE_MB`) | `1024` (Default: `0` / Disabled) |
 | `ENABLE_IMAGES` | Set to `false` to disable bridging of images | `true` (Default: `true`) |
 | `ENABLE_VIDEOS` | Set to `false` to disable bridging of videos | `true` (Default: `true`) |
+| `DEDUPLICATION_ENABLED` | Enable prevention of duplicate media forwarding | `true` (Default: `true`) |
+| `DEDUPLICATION_TTL_MINUTES` | Expiration window in minutes for duplicate suppression | `15` (Default: `15`) |
+| `DEDUPLICATION_CACHE_SIZE` | Maximum number of recently processed media hashes/IDs to remember | `2000` (Default: `2000`) |
 | `LLAMAGUARD_API_URL` | Base URL of an OpenAI-compatible Vision API for Llama Guard checks | `http://192.168.1.100:8000/v1` (Default: `None`/Disabled) |
 | `LLAMAGUARD_MODEL_NAME` | Model name to request for safety moderation | `meta-llama/llama-guard-4-12b` |
 | `LLAMAGUARD_API_KEY` | API authentication key for Llama Guard endpoint if required | `your-api-key` (Default: `None`) |
@@ -86,6 +93,24 @@ The `TG_CHANNELS` environment variable accepts a comma-separated list of several
 - **Public Username**: `MyChannel` or `@MyChannel` (any casing; `@` is stripped automatically).
 - **Private Channel / Group ID**: `-1001234567890`.
 - **Forum Topic Filter**: `channel_id:topic_id` or `username:topic_id` (e.g. `-1001234567890:42`). This configures the bridge to only forward media posted inside that specific topic ID (subchannel thread) of the forum.
+
+---
+
+## Two-Tier Media Deduplication
+
+To prevent duplicate media messages when identical content is posted across multiple monitored channels or re-posted in the same channel, the bridge provides an integrated, in-memory two-tier deduplication engine:
+
+1. **Tier 1 (Pre-Download / Telegram Media ID)**:
+   - When a new Telegram message arrives, the bridge immediately inspects Telegram's internal media identifier (`message.photo.id` or `message.document.id`).
+   - If this Telegram media ID was forwarded within the deduplication window (`DEDUPLICATION_TTL_MINUTES`, default: `15` minutes), the message is skipped **immediately without downloading any bytes**, conserving server network bandwidth.
+2. **Tier 2 (Post-Download / SHA-256 Content Hash)**:
+   - If the Telegram media ID is novel (such as when an image or video is manually uploaded separately to different channels instead of forwarded), the media bytes are downloaded.
+   - Immediately after download, the bridge computes an exact `SHA-256` content hash of the raw bytes in a background thread.
+   - If the content hash was already forwarded within the deduplication window, the media is discarded **before** running Llama Guard safety moderation, thumbnail generation, or Matrix upload.
+3. **Album Integrity**:
+   - For Telegram albums (grouped media), deduplication runs per item. If an album contains a mix of previously seen media and new media, the novel items are forwarded cleanly while duplicates are suppressed.
+4. **Bounded Memory**:
+   - Deduplication is tracked in an LRU/FIFO `OrderedDict` limited to `DEDUPLICATION_CACHE_SIZE` (default: `2000` items) with automatic time-based purging, maintaining a negligible memory footprint (< 1 MB) over indefinite uptimes.
 
 ---
 
@@ -170,6 +195,9 @@ services:
       - MAX_MEDIA_SIZE_MB=80
       - ENABLE_IMAGES=true
       - ENABLE_VIDEOS=true
+      - DEDUPLICATION_ENABLED=true
+      - DEDUPLICATION_TTL_MINUTES=15
+      - DEDUPLICATION_CACHE_SIZE=2000
       - LLAMAGUARD_API_URL=
       - LLAMAGUARD_MODEL_NAME=meta-llama/llama-guard-4-12b
       - LLAMAGUARD_API_KEY=

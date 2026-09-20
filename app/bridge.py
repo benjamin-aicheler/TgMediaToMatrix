@@ -3,6 +3,8 @@ import io
 import time
 import asyncio
 import logging
+import hashlib
+from collections import OrderedDict
 from telethon import TelegramClient, events
 from nio import AsyncClient, UploadResponse, RoomSendResponse, RoomSendError, RoomMessageText
 
@@ -78,6 +80,21 @@ try:
 
     ENABLE_IMAGES = get_env_bool("ENABLE_IMAGES", True)
     ENABLE_VIDEOS = get_env_bool("ENABLE_VIDEOS", True)
+
+    DEDUPLICATION_ENABLED = get_env_bool("DEDUPLICATION_ENABLED", True)
+    try:
+        DEDUPLICATION_TTL_MINUTES = int(os.environ.get("DEDUPLICATION_TTL_MINUTES", "15"))
+        if DEDUPLICATION_TTL_MINUTES < 1:
+            DEDUPLICATION_TTL_MINUTES = 15
+    except ValueError:
+        DEDUPLICATION_TTL_MINUTES = 15
+
+    try:
+        DEDUPLICATION_CACHE_SIZE = int(os.environ.get("DEDUPLICATION_CACHE_SIZE", "2000"))
+        if DEDUPLICATION_CACHE_SIZE < 1:
+            DEDUPLICATION_CACHE_SIZE = 2000
+    except ValueError:
+        DEDUPLICATION_CACHE_SIZE = 2000
 
     LLAMAGUARD_API_URL = os.environ.get("LLAMAGUARD_API_URL", "").strip() or None
     LLAMAGUARD_MODEL_NAME = os.environ.get("LLAMAGUARD_MODEL_NAME", "meta-llama/llama-guard-4-12b").strip()
@@ -168,6 +185,78 @@ except Exception as init_err:
 
 # Cache for already processed album IDs
 PROCESSED_ALBUMS = set()
+
+
+class MediaDeduplicator:
+    """In-memory deduplication cache with TTL and maximum size limit."""
+
+    def __init__(self, enabled: bool = True, ttl_minutes: int = 15, max_size: int = 2000):
+        self.enabled = enabled
+        self.ttl_seconds = ttl_minutes * 60
+        self.max_size = max_size
+        self._cache = OrderedDict()  # key -> float (timestamp)
+
+    def _cleanup(self, now: float):
+        # Evict expired entries from the left (oldest inserted)
+        while self._cache:
+            oldest_key, oldest_ts = next(iter(self._cache.items()))
+            if now - oldest_ts > self.ttl_seconds:
+                self._cache.popitem(last=False)
+            else:
+                break
+        # Evict oldest entries if capacity exceeded
+        while len(self._cache) > self.max_size:
+            self._cache.popitem(last=False)
+
+    def is_duplicate(self, key: str | None) -> bool:
+        if not self.enabled or not key:
+            return False
+        now = time.time()
+        if key in self._cache:
+            if now - self._cache[key] <= self.ttl_seconds:
+                return True
+            else:
+                del self._cache[key]
+        return False
+
+    def mark_seen(self, key: str | None):
+        if not self.enabled or not key:
+            return
+        now = time.time()
+        self._cache[key] = now
+        self._cache.move_to_end(key)
+        self._cleanup(now)
+
+    def unmark(self, key: str | None):
+        if not self.enabled or not key:
+            return
+        self._cache.pop(key, None)
+
+
+media_deduplicator = MediaDeduplicator(
+    enabled=DEDUPLICATION_ENABLED,
+    ttl_minutes=DEDUPLICATION_TTL_MINUTES,
+    max_size=DEDUPLICATION_CACHE_SIZE
+)
+
+
+def get_telegram_media_id(message) -> str | None:
+    """Extracts a unique Telegram internal identifier for the media if present."""
+    if not message:
+        return None
+    photo = getattr(message, 'photo', None)
+    if photo and hasattr(photo, 'id'):
+        return f"tg_photo_{photo.id}"
+    document = getattr(message, 'document', None)
+    if document and hasattr(document, 'id'):
+        return f"tg_doc_{document.id}"
+    return None
+
+
+def compute_sha256(data: bytes) -> str:
+    """Compute SHA-256 hexadecimal digest for raw bytes."""
+    return hashlib.sha256(data).hexdigest()
+
 
 
 def is_channel_and_topic_allowed(chat_id, chat_entity, topic_id=None):
@@ -803,12 +892,14 @@ async def on_matrix_message(room, event: RoomMessageText):
         status_plain = (
             f"[TgMediaToMatrix] Current Status:\n"
             f"- Images: {'ENABLED' if ENABLE_IMAGES else 'DISABLED'}\n"
-            f"- Videos: {'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}"
+            f"- Videos: {'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}\n"
+            f"- Deduplication: {'ENABLED' if DEDUPLICATION_ENABLED else 'DISABLED'} (TTL: {DEDUPLICATION_TTL_MINUTES}m, Cache: {len(media_deduplicator._cache)}/{DEDUPLICATION_CACHE_SIZE})"
         )
         status_html = (
             f"<strong>[TgMediaToMatrix] Current Status:</strong><br/>"
             f"• Images: <code>{'ENABLED' if ENABLE_IMAGES else 'DISABLED'}</code><br/>"
-            f"• Videos: <code>{'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}</code>"
+            f"• Videos: <code>{'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}</code><br/>"
+            f"• Deduplication: <code>{'ENABLED' if DEDUPLICATION_ENABLED else 'DISABLED'}</code> (TTL: {DEDUPLICATION_TTL_MINUTES}m, Cache: {len(media_deduplicator._cache)}/{DEDUPLICATION_CACHE_SIZE})"
         )
         await send_matrix_notice(room.room_id, status_plain, status_html)
         return
@@ -911,18 +1002,39 @@ async def process_and_upload_media(message, source_chat, channel_name):
         logging.info(f"[{source_chat}] Skipping video {filename}: File size ({round(file_size / 1024, 2)} KB) is below minimum required size of {MIN_VIDEO_SIZE_KB} KB.")
         return
 
+    # Pre-download deduplication check (Telegram Media ID)
+    tg_media_id = get_telegram_media_id(message)
+    if tg_media_id and media_deduplicator.is_duplicate(tg_media_id):
+        logging.info(f"[{source_chat}] Skipping duplicate media {filename}: Telegram media ID ({tg_media_id}) was already forwarded within {DEDUPLICATION_TTL_MINUTES}m.")
+        return
+
+    if tg_media_id:
+        media_deduplicator.mark_seen(tg_media_id)
+
     logging.info(f"[{source_chat}] Processing media: {filename} ({mime_type}). Starting Telegram download...")
     
     try:
         media_bytes = await message.download_media(file=bytes)
         if not media_bytes:
             logging.error(f"[{source_chat}] Telegram download failed for: {filename}")
+            if tg_media_id:
+                media_deduplicator.unmark(tg_media_id)
             return
     except Exception as e:
         logging.error(f"[{source_chat}] Critical error during Telegram download: {e}")
+        if tg_media_id:
+            media_deduplicator.unmark(tg_media_id)
         return
 
     logging.info(f"[{source_chat}] Download complete ({len(media_bytes)} bytes).")
+
+    # Post-download deduplication check (Content SHA-256)
+    content_hash = await asyncio.to_thread(compute_sha256, media_bytes)
+    content_key = f"sha256_{content_hash}"
+    if media_deduplicator.is_duplicate(content_key):
+        logging.info(f"[{source_chat}] Skipping duplicate media {filename}: Content hash ({content_hash[:12]}...) was already forwarded within {DEDUPLICATION_TTL_MINUTES}m.")
+        return
+    media_deduplicator.mark_seen(content_key)
 
     # Llama Guard Safety Check
     if LLAMAGUARD_API_URL:
@@ -1164,6 +1276,7 @@ async def main():
     logging.info(f"Configured min video limit: {MIN_VIDEO_SIZE_KB} KB ({round(MIN_VIDEO_SIZE_KB / 1024, 2)} MB)" if MIN_VIDEO_SIZE_KB > 0 else "Configured min video limit: None")
     logging.info(f"Images enabled: {ENABLE_IMAGES}")
     logging.info(f"Videos enabled: {ENABLE_VIDEOS}")
+    logging.info(f"Media deduplication: {'Enabled' if DEDUPLICATION_ENABLED else 'Disabled'} (TTL: {DEDUPLICATION_TTL_MINUTES} min, Max cache: {DEDUPLICATION_CACHE_SIZE})")
 
     matrix_sync_task = None
     if ADMIN_MATRIX_USER_ID or ALLOW_NON_ADMIN_STOP:

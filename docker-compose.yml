@@ -23,6 +23,9 @@ services:
       - MIN_VIDEO_SIZE_KB=0
       - ENABLE_IMAGES=true
       - ENABLE_VIDEOS=true
+      - DEDUPLICATION_ENABLED=true
+      - DEDUPLICATION_TTL_MINUTES=15
+      - DEDUPLICATION_CACHE_SIZE=2000
       - LLAMAGUARD_API_URL=
       - LLAMAGUARD_MODEL_NAME=meta-llama/llama-guard-4-12b
       - LLAMAGUARD_API_KEY=
