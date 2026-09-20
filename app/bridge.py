@@ -317,6 +317,7 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
         return []
 
     frames_bytes = []
+    container = None
     try:
         container = av.open(io.BytesIO(video_bytes))
         video_stream = container.streams.video[0]
@@ -382,6 +383,12 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
 
     except Exception as e:
         logging.error(f"Failed to extract frames from video: {e}")
+    finally:
+        if container is not None:
+            try:
+                container.close()
+            except Exception:
+                pass
     return frames_bytes
 
 
@@ -1237,31 +1244,33 @@ async def master_handler(event):
         PROCESSED_ALBUMS.add(album_id)
         logging.info(f"[{chat_identifier}] New album detected (Grouped ID: {album_id}). Waiting for complete reception...")
         
-        await asyncio.sleep(2.5)
-        
         try:
-            album_messages = await tg_client.get_messages(
-                event.chat_id, 
-                min_id=event.message.id - 15, 
-                max_id=event.message.id + 15,
-                limit=30
-            )
-            filtered_messages = [m for m in album_messages if m.grouped_id == album_id]
+            await asyncio.sleep(2.5)
             
-            logging.info(f"[{chat_identifier}] Processing {len(filtered_messages)} items from album {album_id}...")
-            for msg in reversed(filtered_messages):
-                if msg.media:
-                    exact_size = msg.file.size if msg.file else 0
-                    if exact_size > MAX_MEDIA_SIZE_BYTES:
-                        logging.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({MAX_MEDIA_SIZE_MB} MB)")
-                        continue
-                    
-                await process_and_upload_media(msg, chat_identifier, channel_display)
-        except Exception as e:
-            logging.error(f"[{chat_identifier}] Error loading album {album_id}: {e}")
-            
-        await asyncio.sleep(10)
-        PROCESSED_ALBUMS.discard(album_id)
+            try:
+                album_messages = await tg_client.get_messages(
+                    event.chat_id, 
+                    min_id=event.message.id - 15, 
+                    max_id=event.message.id + 15,
+                    limit=30
+                )
+                filtered_messages = [m for m in album_messages if m.grouped_id == album_id]
+                
+                logging.info(f"[{chat_identifier}] Processing {len(filtered_messages)} items from album {album_id}...")
+                for msg in reversed(filtered_messages):
+                    if msg.media:
+                        exact_size = msg.file.size if msg.file else 0
+                        if exact_size > MAX_MEDIA_SIZE_BYTES:
+                            logging.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({MAX_MEDIA_SIZE_MB} MB)")
+                            continue
+                        
+                    await process_and_upload_media(msg, chat_identifier, channel_display)
+            except Exception as e:
+                logging.error(f"[{chat_identifier}] Error loading album {album_id}: {e}")
+                
+            await asyncio.sleep(10)
+        finally:
+            PROCESSED_ALBUMS.discard(album_id)
     else:
         await process_and_upload_media(event.message, chat_identifier, channel_display)
 
