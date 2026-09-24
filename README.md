@@ -217,40 +217,36 @@ Edit the `docker-compose.yml` file and insert your configuration credentials:
 ```yaml
 services:
   telegram-matrix-bridge:
-    image: python:3.14-slim
+    build: .
+    image: ghcr.io/benjamin-aicheler/tgmediatomatrix:main
     container_name: tg_matrix_media_bridge
     restart: unless-stopped
+    shm_size: 1g
     volumes:
       - ./app:/app
       - ./session_data:/app/session
-    working_dir: /app
-    command: sh -c "pip install --no-cache-dir telethon matrix-nio av Pillow blurhash && python bridge.py"
     environment:
       - TG_API_ID=your_tg_api_id
       - TG_API_HASH=your_tg_api_hash
       - MATRIX_HOMESERVER=https://matrix.org
       - MATRIX_ACCESS_TOKEN=your_matrix_access_token
-      - MATRIX_ROOM_ID=!your_room_id:matrix.org
+      - MATRIX_ROOM_IDS=!room1:matrix.org,!room2:matrix.org
       - TG_CHANNELS=MyChannel,MyOtherChannel
       - MAX_MEDIA_SIZE_MB=80
+      - OVERSIZED_VIDEO_ACTION=split
+      - OVERSIZED_VIDEO_MAX_INPUT_MB=250
       - ENABLE_IMAGES=true
       - ENABLE_VIDEOS=true
       - DEDUPLICATION_ENABLED=true
       - DEDUPLICATION_TTL_MINUTES=15
       - DEDUPLICATION_CACHE_SIZE=2000
-      - LLAMAGUARD_API_URL=
-      - LLAMAGUARD_MODEL_NAME=meta-llama/llama-guard-4-12b
-      - LLAMAGUARD_API_KEY=
-      - LLAMAGUARD_CHECKS=
-      - LLAMAGUARD_REQUIRE_CHECKS=
-
 ```
 
 ### 2. First-Run Session Authentication
 On the very first run, Telethon needs to authenticate with your Telegram account (using your phone number and login code). To do this interactively, run the container with an interactive shell:
 
 ```bash
-docker compose run --entrypoint python telegram-matrix-bridge bridge.py
+docker compose run --rm telegram-matrix-bridge python bridge.py
 ```
 
 1. Enter your **phone number** (including country code, e.g. `+1234567890`).
@@ -273,15 +269,33 @@ docker compose logs -f tg_matrix_media_bridge
 
 ---
 
+## Automated Multi-Arch Builds (GitHub Actions)
+
+A GitHub Actions workflow (`.github/workflows/docker-build.yml`) is configured to automatically build and push multi-architecture Docker images (`linux/amd64` and `linux/arm64`) to the GitHub Container Registry (`ghcr.io/benjamin-aicheler/tgmediatomatrix:main`) on every push to the `main` branch.
+
+This ensures Raspberry Pi 4 (`arm64`) and x86_64 servers can pull prebuilt, instant-startup images without building or installing packages locally:
+```bash
+docker compose pull
+docker compose up -d
+```
+
+---
+
 ## File Structure
 
 ```bash
 TgMediaToMatrix/
+├── .github/
+│   └── workflows/
+│       └── docker-build.yml # Automated multi-arch CI/CD workflow
 ├── app/
-│   └── bridge.py        # Core bridge python application
-├── session_data/        # Persistent Telegram session database (generated)
-├── docker-compose.yml   # Multi-container orchestration definition
-└── README.md            # This documentation file
+│   └── bridge.py            # Core bridge python application
+├── session_data/            # Persistent Telegram session database (generated)
+├── .dockerignore            # Files excluded from Docker build context
+├── Dockerfile               # Production container image definition
+├── requirements.txt         # Pinned Python package dependencies
+├── docker-compose.yml       # Multi-container orchestration definition
+└── README.md                # Documentation file
 ```
 
 ---

@@ -1,14 +1,13 @@
 services:
   telegram-matrix-bridge:
-    image: python:3.14-slim
+    build: .
+    image: ghcr.io/benjamin-aicheler/tgmediatomatrix:main
     container_name: tg_matrix_media_bridge
     restart: unless-stopped
+    shm_size: 1g
     volumes:
       - ./app:/app
       - ./session_data:/app/session
-    working_dir: /app
-    shm_size: 1g
-    command: sh -c "apt-get update && apt-get install -y --no-install-recommends ffmpeg && pip install --no-cache-dir telethon matrix-nio av Pillow blurhash && python bridge.py"
     environment:
       - TG_API_ID=
       - TG_API_HASH=

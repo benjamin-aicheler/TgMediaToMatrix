@@ -1,0 +1,5 @@
+telethon
+matrix-nio
+av
+Pillow
+blurhash

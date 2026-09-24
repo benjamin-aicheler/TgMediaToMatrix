@@ -1,0 +1,24 @@
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Sessions and local authentication
+session_data/
+session/
+*.session
+*.session-journal
+
+# Git and GitHub
+.git/
+.github/
+.gitignore
+
+# Agent metadata and local scratch files
+.agents/
+scratch/
+
+# Documentation and licensing
+README.md
+LICENSE
+docker-compose.yml
