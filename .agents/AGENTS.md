@@ -55,7 +55,26 @@ This file contains development rules and architectural guidelines for AI agents 
 - Image thumbnails must be generated dynamically in-memory from full-sized media bytes using Pillow rather than making redundant network requests to Telegram.
 - Check if the original image is already smaller than the max thumbnail bounds (e.g. 800x800) and return early with the original bytes to avoid unnecessary re-encoding.
 
+### Video Splitting & RAM-Disk Processing
+- When handling oversized videos that exceed Matrix homeserver limits, prioritize lossless stream-copy splitting (`-c copy`) over re-encoding to minimize CPU and RAM consumption on low-power devices like Raspberry Pi 4.
+- Because FFmpeg requires seekable filesystem paths to write MP4 `moov` index headers and multi-file segments, video splitting operations must use `/dev/shm` (Linux tmpfs RAM disk) rather than physical disk or microSD storage. Ensure temporary chunk directories are deleted immediately in `finally` blocks.
+
 ### Dependency Isolation
 - Isolate the imports of optional binary/C-bound packages (like `av` and `PIL`) inside the functions that use them, catching `ImportError` gracefully, to keep the main service core runnable even if those specific packages are not present.
+
+---
+
+## 5. Deployment, Containerization & CI/CD
+
+### Python Base Image & Architecture Support
+- Use the stable production Python slim image (e.g. `python:3.13-slim`) to ensure pre-compiled `linux/arm64` binary wheels are readily available on PyPI. Avoid pre-release Python versions that force expensive C/Rust source compilation during builds on ARM devices.
+- Container builds must be multi-architecture (`linux/amd64` and `linux/arm64`) to run natively on both servers and Raspberry Pi 4.
+
+### Image Tagging & Release Workflow
+- Automated container builds via GitHub Actions should trigger on pushes to `main` and tag images with `:main` (`ghcr.io/benjamin-aicheler/tgmediatomatrix:main`).
+- Production `docker-compose.yml` should reference the published `:main` image directly (without `build: .`) so target devices like Raspberry Pi pull the prebuilt image instead of building locally.
+
+### Resource Allocation
+- Always configure adequate shared memory (`shm_size: 1g`) in Docker Compose to ensure in-memory video segmenting in `/dev/shm` does not encounter "No space left on device" errors.
 
 
