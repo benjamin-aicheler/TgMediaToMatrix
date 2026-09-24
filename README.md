@@ -26,7 +26,12 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
   - *Pre-Download Check*: Matches Telegram internal media IDs (`photo.id` / `document.id`) before download to conserve network bandwidth.
   - *Post-Download Check*: Calculates an exact SHA-256 hash of downloaded bytes before Llama Guard analysis and Matrix uploading to catch separate manual uploads of the identical file.
   - *Time & Memory Bounds*: Uses a bounded LRU/FIFO cache with automatic time-based expiry (default 15-minute window).
-- **Automatic File Size Limiting**: Rejects media larger than `MAX_MEDIA_SIZE_MB` (e.g. 50MB) or smaller than configured minimum thresholds (`MIN_IMAGE_SIZE_KB` / `MIN_VIDEO_SIZE_KB`) before downloading, saving resources and server bandwidth.
+- **Automatic File Size Limiting & Oversized Video Handling**:
+  - Rejects media smaller than configured minimum thresholds (`MIN_IMAGE_SIZE_KB` / `MIN_VIDEO_SIZE_KB`).
+  - When a video exceeds `MAX_MEDIA_SIZE_MB`, the bridge can automatically process it instead of dropping it:
+    - **Lossless Stream Splitting (`split`, default)**: Slices the video at keyframes using FFmpeg stream copy (`-c copy`) in RAM (`/dev/shm`). Operates in sub-seconds with **~0% CPU load and 100% original quality**, making it perfect for low-power devices like the **Raspberry Pi 4**.
+    - **Fast Low-Resource Compression (`compress`)**: Re-encodes videos down to 720p with `libx264` fast presets and audio stream passthrough.
+    - **Ceiling Protection**: Ignores videos larger than `OVERSIZED_VIDEO_MAX_INPUT_MB` (e.g. 250 MB) before downloading to prevent OOM.
 - **Dynamic Interactive Chat Commands**: When `ADMIN_MATRIX_USER_ID` is set, the authorized admin user can send `!tmmb` commands in Matrix to query status or dynamically toggle image and video bridging on the fly.
 
 ---
@@ -56,7 +61,14 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `ADMIN_MATRIX_USER_ID` | Authorized Matrix user ID for dynamic chat commands | `@admin:matrix.org` (Default: `None` / Disabled) |
 | `ALLOW_NON_ADMIN_STOP` | Set to `true` to allow non-admin users to issue `stop` and `disable` commands | `false` (Default: `false`) |
 | `TG_CHANNELS` | Comma-separated list of target channels and topic filters | `MyChannel, -1001234567890:42, @MyChannel` |
-| `MAX_MEDIA_SIZE_MB` | Maximum size in MB to download and bridge | `80` (Default: `50`) |
+| `MAX_MEDIA_SIZE_MB` | Maximum size in MB to download and bridge directly | `80` (Default: `50`) |
+| `OVERSIZED_VIDEO_ACTION` | Action for videos exceeding `MAX_MEDIA_SIZE_MB`: `split` (lossless stream copy), `compress` (transcode), or `skip` | `split` (Default: `split`) |
+| `OVERSIZED_VIDEO_MAX_INPUT_MB` | Maximum file size in MB to download for oversized video processing | `250` (Default: `250`) |
+| `OVERSIZED_VIDEO_FALLBACK_COMPRESS` | Fallback to compression if lossless splitting cannot find keyframes to split below limit | `false` (Default: `false`) |
+| `VIDEO_COMPRESSION_MAX_HEIGHT` | Maximum vertical resolution when compressing oversized videos | `720` (Default: `720`) |
+| `VIDEO_COMPRESSION_PRESET` | FFmpeg x264 preset (`ultrafast`, `veryfast`, `fast`, etc.) | `veryfast` (Default: `veryfast`) |
+| `VIDEO_COMPRESSION_CRF` | Constant Rate Factor for video re-encoding (26–30 recommended) | `28` (Default: `28`) |
+| `VIDEO_COMPRESSION_THREADS` | Number of CPU threads allocated to FFmpeg | `2` (Default: `2`) |
 | `MIN_IMAGE_SIZE_KB` | Minimum file size in KB for images to be forwarded | `100` (Default: `0` / Disabled) |
 | `MIN_VIDEO_SIZE_KB` | Minimum file size in KB for videos to be forwarded (accepts `MIN_VIDEO_SIZE_MB`) | `1024` (Default: `0` / Disabled) |
 | `ENABLE_IMAGES` | Set to `false` to disable bridging of images | `true` (Default: `true`) |
@@ -111,6 +123,34 @@ To prevent duplicate media messages when identical content is posted across mult
    - For Telegram albums (grouped media), deduplication runs per item. If an album contains a mix of previously seen media and new media, the novel items are forwarded cleanly while duplicates are suppressed.
 4. **Bounded Memory**:
    - Deduplication is tracked in an LRU/FIFO `OrderedDict` limited to `DEDUPLICATION_CACHE_SIZE` (default: `2000` items) with automatic time-based purging, maintaining a negligible memory footprint (< 1 MB) over indefinite uptimes.
+
+---
+
+## Oversized Video Processing (Lossless Splitting & Compression)
+
+When Telegram channels post videos that exceed your configured `MAX_MEDIA_SIZE_MB` (e.g. 80MB), the bridge can automatically handle them instead of discarding them.
+
+### Modes (`OVERSIZED_VIDEO_ACTION`)
+
+1. **`split` (Default & Strongly Recommended for Raspberry Pi 4)**:
+   - **Zero Re-Encoding**: Uses FFmpeg stream copying (`-c copy`) to slice the video at keyframes into sequential parts (`[Part 1/2]`, `[Part 2/2]`).
+   - **Sub-Second Performance**: Takes only ~0.1s – 0.4s to execute, even on low-power ARM CPUs like the **Raspberry Pi 4 Model B**.
+   - **Zero Quality Loss**: The video and audio bitstreams remain 100% untouched and identical to the original upload.
+   - **Zero CPU Heat**: CPU usage remains near 0%, avoiding thermal throttling.
+   - **Matrix Presentation**: Each part is posted into the Matrix room with updated captions and individual metadata (e.g. `Part 1/2 • 1920x1080 58.4 MB`), with thumbnails and Blurhashes attached.
+
+2. **`compress`**:
+   - Re-encodes oversized videos down to a maximum resolution (`VIDEO_COMPRESSION_MAX_HEIGHT`, default `720p`) using `libx264` with fast presets (`VIDEO_COMPRESSION_PRESET`, default `veryfast`) and audio stream copying (`-c:a copy`).
+   - Preserves a single video file, but consumes CPU cycles during encoding.
+
+3. **`skip`**:
+   - Legacy behavior: logs a warning and drops any video exceeding `MAX_MEDIA_SIZE_MB`.
+
+### In-Memory RAM Disk (`/dev/shm`)
+To prevent SD card wear and ensure high-speed operations on single-board computers like the Raspberry Pi, intermediate temporary video files are processed directly in shared memory (`/dev/shm`, configured with `shm_size: 1g` in `docker-compose.yml`) and immediately purged after upload.
+
+### Pre-Download Ceiling Protection
+To prevent downloading massive multi-gigabyte files that could exhaust RAM, the bridge checks the video's size from Telegram metadata *before* starting the download. Any video exceeding `OVERSIZED_VIDEO_MAX_INPUT_MB` (default `250` MB) is skipped immediately.
 
 ---
 

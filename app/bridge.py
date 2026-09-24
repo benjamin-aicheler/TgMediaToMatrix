@@ -1,6 +1,10 @@
 import os
 import io
 import time
+import math
+import shutil
+import tempfile
+import subprocess
 import asyncio
 import logging
 import hashlib
@@ -80,6 +84,50 @@ try:
 
     ENABLE_IMAGES = get_env_bool("ENABLE_IMAGES", True)
     ENABLE_VIDEOS = get_env_bool("ENABLE_VIDEOS", True)
+
+    OVERSIZED_VIDEO_ACTION = os.environ.get("OVERSIZED_VIDEO_ACTION", "split").strip().lower()
+    if OVERSIZED_VIDEO_ACTION not in ("split", "compress", "skip"):
+        raise ValueError(f"Invalid OVERSIZED_VIDEO_ACTION '{OVERSIZED_VIDEO_ACTION}'. Must be one of: 'split', 'compress', 'skip'.")
+
+    try:
+        OVERSIZED_VIDEO_MAX_INPUT_MB = int(os.environ.get("OVERSIZED_VIDEO_MAX_INPUT_MB", "250"))
+        if OVERSIZED_VIDEO_MAX_INPUT_MB < MAX_MEDIA_SIZE_MB:
+            OVERSIZED_VIDEO_MAX_INPUT_MB = MAX_MEDIA_SIZE_MB
+    except ValueError:
+        OVERSIZED_VIDEO_MAX_INPUT_MB = 250
+    OVERSIZED_VIDEO_MAX_INPUT_BYTES = OVERSIZED_VIDEO_MAX_INPUT_MB * 1024 * 1024
+
+    OVERSIZED_VIDEO_FALLBACK_COMPRESS = get_env_bool("OVERSIZED_VIDEO_FALLBACK_COMPRESS", False)
+
+    try:
+        VIDEO_COMPRESSION_MAX_HEIGHT = int(os.environ.get("VIDEO_COMPRESSION_MAX_HEIGHT", "720"))
+    except ValueError:
+        VIDEO_COMPRESSION_MAX_HEIGHT = 720
+
+    VIDEO_COMPRESSION_PRESET = os.environ.get("VIDEO_COMPRESSION_PRESET", "veryfast").strip().lower()
+    if VIDEO_COMPRESSION_PRESET not in ("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"):
+        VIDEO_COMPRESSION_PRESET = "veryfast"
+
+    try:
+        VIDEO_COMPRESSION_CRF = int(os.environ.get("VIDEO_COMPRESSION_CRF", "28"))
+    except ValueError:
+        VIDEO_COMPRESSION_CRF = 28
+
+    try:
+        VIDEO_COMPRESSION_THREADS = int(os.environ.get("VIDEO_COMPRESSION_THREADS", "2"))
+    except ValueError:
+        VIDEO_COMPRESSION_THREADS = 2
+
+    FFMPEG_PATH = shutil.which("ffmpeg")
+    if not FFMPEG_PATH:
+        try:
+            import imageio_ffmpeg
+            FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            pass
+
+    if OVERSIZED_VIDEO_ACTION in ("split", "compress") and not FFMPEG_PATH:
+        logging.warning("FFmpeg executable was not found on PATH. Oversized video processing will be skipped until ffmpeg is installed.")
 
     DEDUPLICATION_ENABLED = get_env_bool("DEDUPLICATION_ENABLED", True)
     try:
@@ -390,6 +438,296 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
             except Exception:
                 pass
     return frames_bytes
+
+
+def is_video_message(message) -> bool:
+    """Checks whether a Telegram message represents a video document."""
+    if not message:
+        return False
+    if getattr(message, 'video', None) is not None:
+        return True
+    if getattr(message, 'file', None) and getattr(message.file, 'mime_type', None):
+        return message.file.mime_type.startswith("video/")
+    return False
+
+
+def get_temp_dir() -> str | None:
+    """Returns /dev/shm (shared-memory ramdisk) if available with adequate space, otherwise None (system default /tmp)."""
+    if os.path.exists("/dev/shm"):
+        try:
+            stat = os.statvfs("/dev/shm")
+            free_bytes = stat.f_bavail * stat.f_frsize
+            if free_bytes > 200 * 1024 * 1024:
+                return "/dev/shm"
+        except Exception:
+            pass
+    return None
+
+
+def probe_video_duration(video_path: str, ffmpeg_bin: str) -> float | None:
+    """Probes the video duration in seconds using ffprobe or av."""
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin and ffmpeg_bin:
+        candidate = os.path.join(os.path.dirname(ffmpeg_bin), "ffprobe")
+        if os.path.exists(candidate):
+            ffprobe_bin = candidate
+    if ffprobe_bin:
+        try:
+            res = subprocess.run(
+                [ffprobe_bin, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=5
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                val = float(res.stdout.strip())
+                if val > 0:
+                    return val
+        except Exception:
+            pass
+
+    try:
+        import av
+        container = av.open(video_path)
+        dur = None
+        for stream in container.streams.video:
+            if stream.duration and stream.time_base:
+                dur = float(stream.duration * stream.time_base)
+                break
+        if dur is None and container.duration:
+            dur = float(container.duration / 1000000.0)
+        container.close()
+        if dur and dur > 0:
+            return dur
+    except Exception:
+        pass
+
+    return None
+
+
+def probe_video_dimensions(video_path: str, ffmpeg_bin: str) -> tuple[int, int] | None:
+    """Probes video width and height using ffprobe or av."""
+    ffprobe_bin = shutil.which("ffprobe")
+    if not ffprobe_bin and ffmpeg_bin:
+        candidate = os.path.join(os.path.dirname(ffmpeg_bin), "ffprobe")
+        if os.path.exists(candidate):
+            ffprobe_bin = candidate
+    if ffprobe_bin:
+        try:
+            res = subprocess.run(
+                [ffprobe_bin, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", video_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=5
+            )
+            if res.returncode == 0 and "x" in res.stdout:
+                w_str, h_str = res.stdout.strip().split("x", 1)
+                return int(w_str), int(h_str)
+        except Exception:
+            pass
+
+    try:
+        import av
+        container = av.open(video_path)
+        for stream in container.streams.video:
+            if stream.width and stream.height:
+                dims = (int(stream.width), int(stream.height))
+                container.close()
+                return dims
+        container.close()
+    except Exception:
+        pass
+
+    return None
+
+
+def split_video_lossless(
+    video_bytes: bytes,
+    filename: str,
+    max_bytes: int,
+    source_chat: str,
+    known_duration: float = None
+) -> list[dict]:
+    """
+    Losslessly splits an oversized video into sequential parts smaller than max_bytes using FFmpeg stream copy (-c copy).
+    Operates in-memory via /dev/shm (if available) with zero re-encoding, optimal for low-power CPUs like Raspberry Pi 4.
+    """
+    t0 = time.time()
+    ffmpeg_bin = FFMPEG_PATH or shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        logging.error(f"[{source_chat}] FFmpeg binary not found. Cannot split video.")
+        return []
+
+    name_part, ext = os.path.splitext(filename)
+    if not ext or ext.lower() not in ('.mp4', '.mkv', '.webm', '.mov', '.avi'):
+        ext = '.mp4'
+
+    total_size = len(video_bytes)
+    target_part_size = max_bytes * 0.85
+    parts_count = max(2, math.ceil(total_size / target_part_size))
+
+    temp_dir_parent = get_temp_dir()
+    with tempfile.TemporaryDirectory(dir=temp_dir_parent) as tmp_dir:
+        input_path = os.path.join(tmp_dir, f"input{ext}")
+        with open(input_path, "wb") as f:
+            f.write(video_bytes)
+
+        duration = known_duration
+        if not duration or duration <= 0:
+            duration = probe_video_duration(input_path, ffmpeg_bin)
+
+        if duration and duration > 0:
+            segment_time = max(1.0, round(duration / parts_count, 2))
+        else:
+            segment_time = 15.0
+
+        output_pattern = os.path.join(tmp_dir, f"part_%03d{ext}")
+        cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-i", input_path,
+            "-map", "0:v?",
+            "-map", "0:a?",
+            "-c", "copy",
+            "-f", "segment",
+            "-segment_time", str(segment_time),
+            "-reset_timestamps", "1",
+        ]
+        if ext.lower() in ('.mp4', '.mov'):
+            cmd.extend(["-movflags", "+faststart"])
+        cmd.append(output_pattern)
+
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if res.returncode != 0:
+            logging.error(f"[{source_chat}] FFmpeg split error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
+            return []
+
+        part_files = sorted([
+            os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
+            if f.startswith("part_") and f.endswith(ext)
+        ])
+
+        if len(part_files) <= 1 and duration and duration > 2.0:
+            segment_time = max(1.0, round(segment_time / 2, 2))
+            for f in part_files:
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+            cmd[-2] = str(segment_time)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            part_files = sorted([
+                os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
+                if f.startswith("part_") and f.endswith(ext)
+            ])
+
+        if len(part_files) <= 1:
+            logging.warning(f"[{source_chat}] Video could not be split losslessly (no internal keyframes found).")
+            return []
+
+        oversized_parts = [f for f in part_files if os.path.getsize(f) > max_bytes]
+        if oversized_parts:
+            logging.warning(
+                f"[{source_chat}] Splitting produced {len(part_files)} parts, but {len(oversized_parts)} part(s) "
+                f"still exceed {max_bytes / (1024 * 1024):.1f} MB due to keyframe spacing."
+            )
+
+        results = []
+        total_parts = len(part_files)
+        for i, ppath in enumerate(part_files):
+            with open(ppath, "rb") as pf:
+                p_bytes = pf.read()
+
+            part_dur = probe_video_duration(ppath, ffmpeg_bin)
+            part_dims = probe_video_dimensions(ppath, ffmpeg_bin)
+
+            results.append({
+                "bytes": p_bytes,
+                "filename": f"{name_part}_part{i+1}_of_{total_parts}{ext}",
+                "part_index": i + 1,
+                "total_parts": total_parts,
+                "duration_ms": int(part_dur * 1000) if part_dur else None,
+                "w": part_dims[0] if part_dims else None,
+                "h": part_dims[1] if part_dims else None,
+                "size": len(p_bytes)
+            })
+
+        logging.info(
+            f"[{source_chat}] Video ({total_size / (1024 * 1024):.2f} MB) losslessly split into "
+            f"{total_parts} parts in {time.time() - t0:.2f}s."
+        )
+        return results
+
+
+def compress_video(
+    video_bytes: bytes,
+    filename: str,
+    max_bytes: int,
+    source_chat: str,
+    max_height: int = 720,
+    preset: str = "veryfast",
+    crf: int = 28,
+    threads: int = 2
+) -> dict | None:
+    """
+    Compresses an oversized video by downscaling resolution and re-encoding with libx264.
+    Uses fast preset and audio stream copy to minimize CPU utilization.
+    """
+    t0 = time.time()
+    ffmpeg_bin = FFMPEG_PATH or shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        logging.error(f"[{source_chat}] FFmpeg binary not found. Cannot compress video.")
+        return None
+
+    name_part, ext = os.path.splitext(filename)
+    out_ext = ".mp4"
+
+    temp_dir_parent = get_temp_dir()
+    with tempfile.TemporaryDirectory(dir=temp_dir_parent) as tmp_dir:
+        input_path = os.path.join(tmp_dir, f"input{ext or '.mp4'}")
+        output_path = os.path.join(tmp_dir, f"output{out_ext}")
+        with open(input_path, "wb") as f:
+            f.write(video_bytes)
+
+        scale_filter = f"scale='if(gte(iw,ih),min(1280,iw),-2)':'if(gte(iw,ih),-2,min({max_height},ih))'"
+
+        cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-i", input_path,
+            "-vf", scale_filter,
+            "-c:v", "libx264",
+            "-preset", preset,
+            "-crf", str(crf),
+            "-threads", str(threads),
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            output_path
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if res.returncode != 0:
+            cmd[-3:-2] = ["-c:a", "aac", "-b:a", "128k"]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if res.returncode != 0:
+                logging.error(f"[{source_chat}] FFmpeg compression failed: {res.stderr.decode('utf-8', errors='replace')[:400]}")
+                return None
+
+        if os.path.exists(output_path):
+            with open(output_path, "rb") as out_f:
+                out_bytes = out_f.read()
+
+            dur = probe_video_duration(output_path, ffmpeg_bin)
+            dims = probe_video_dimensions(output_path, ffmpeg_bin)
+
+            logging.info(
+                f"[{source_chat}] Video compressed from {len(video_bytes)/(1024*1024):.2f} MB "
+                f"to {len(out_bytes)/(1024*1024):.2f} MB ({(1 - len(out_bytes)/len(video_bytes))*100:.1f}% reduction) in {time.time() - t0:.2f}s."
+            )
+            return {
+                "bytes": out_bytes,
+                "filename": f"{name_part}{out_ext}",
+                "duration_ms": int(dur * 1000) if dur else None,
+                "w": dims[0] if dims else None,
+                "h": dims[1] if dims else None,
+                "size": len(out_bytes)
+            }
+    return None
 
 
 # Formats a Telegram still image can legitimately be. Anything else is treated as
@@ -900,12 +1238,14 @@ async def on_matrix_message(room, event: RoomMessageText):
             f"[TgMediaToMatrix] Current Status:\n"
             f"- Images: {'ENABLED' if ENABLE_IMAGES else 'DISABLED'}\n"
             f"- Videos: {'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}\n"
+            f"- Oversized Videos: {OVERSIZED_VIDEO_ACTION.upper()} (Limit: {MAX_MEDIA_SIZE_MB}MB, Ceiling: {OVERSIZED_VIDEO_MAX_INPUT_MB}MB)\n"
             f"- Deduplication: {'ENABLED' if DEDUPLICATION_ENABLED else 'DISABLED'} (TTL: {DEDUPLICATION_TTL_MINUTES}m, Cache: {len(media_deduplicator._cache)}/{DEDUPLICATION_CACHE_SIZE})"
         )
         status_html = (
             f"<strong>[TgMediaToMatrix] Current Status:</strong><br/>"
             f"• Images: <code>{'ENABLED' if ENABLE_IMAGES else 'DISABLED'}</code><br/>"
             f"• Videos: <code>{'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}</code><br/>"
+            f"• Oversized Videos: <code>{OVERSIZED_VIDEO_ACTION.upper()}</code> (Limit: {MAX_MEDIA_SIZE_MB}MB, Ceiling: {OVERSIZED_VIDEO_MAX_INPUT_MB}MB)<br/>"
             f"• Deduplication: <code>{'ENABLED' if DEDUPLICATION_ENABLED else 'DISABLED'}</code> (TTL: {DEDUPLICATION_TTL_MINUTES}m, Cache: {len(media_deduplicator._cache)}/{DEDUPLICATION_CACHE_SIZE})"
         )
         await send_matrix_notice(room.room_id, status_plain, status_html)
@@ -970,6 +1310,88 @@ async def on_matrix_message(room, event: RoomMessageText):
     unknown_plain = f"[TgMediaToMatrix] Unknown command '{body}'. Type '!tmmb help' for usage."
     unknown_html = f"<strong>[TgMediaToMatrix]</strong> Unknown command <code>{body}</code>. Type <code>!tmmb help</code> for usage."
     await send_matrix_notice(room.room_id, unknown_plain, unknown_html)
+
+
+async def send_matrix_media_event(
+    media_bytes: bytes,
+    mime_type: str,
+    filename: str,
+    msg_type: str,
+    info_dict: dict,
+    source_chat: str,
+    channel_name: str,
+    caption_prefix: str = None,
+    blurhash_str: str = None
+) -> bool:
+    """Uploads in-memory media bytes to Matrix homeserver and dispatches room messages across MATRIX_ROOM_IDS."""
+    logging.info(f"[{source_chat}] Uploading to Matrix homeserver: {filename} ({len(media_bytes)} bytes)...")
+    try:
+        upload_resp, _ = await matrix_client.upload(
+            io.BytesIO(media_bytes),
+            content_type=mime_type,
+            filename=filename,
+            filesize=len(media_bytes)
+        )
+        if not isinstance(upload_resp, UploadResponse):
+            logging.error(f"[{source_chat}] Matrix server rejected upload for {filename}! Response: {upload_resp}")
+            return False
+
+        content_uri = upload_resp.content_uri
+        logging.info(f"[{source_chat}] Upload successful! MXC-URI: {content_uri}. Sending room message...")
+
+        size_bytes = len(media_bytes)
+        if size_bytes < 1024:
+            size_str = f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            size_str = f"{size_bytes / 1024:.2f} KB"
+        else:
+            size_str = f"{size_bytes / (1024 * 1024):.2f} MB"
+
+        if info_dict and "w" in info_dict and "h" in info_dict:
+            meta_line = f"{info_dict['w']}x{info_dict['h']} {size_str}"
+        else:
+            meta_line = f"{size_str}"
+
+        if caption_prefix:
+            meta_line = f"{caption_prefix} • {meta_line}"
+
+        body_text = meta_line
+        formatted_body_text = f'<font color="#888888"><small>{meta_line}</small></font>'
+
+        matrix_content = {
+            "msgtype": msg_type,
+            "body": body_text,
+            "url": content_uri,
+            "filename": filename,
+            "format": "org.matrix.custom.html",
+            "formatted_body": formatted_body_text,
+            "source": channel_name
+        }
+        if blurhash_str:
+            info_dict["xyz.amorgan.blurhash"] = blurhash_str
+        if info_dict:
+            matrix_content["info"] = info_dict
+
+        for target_room_id in MATRIX_ROOM_IDS:
+            try:
+                send_response = await matrix_client.room_send(
+                    room_id=target_room_id,
+                    message_type="m.room.message",
+                    content=matrix_content
+                )
+                if isinstance(send_response, RoomSendResponse):
+                    logging.info(f"[{source_chat}] Event successfully posted in Matrix room '{target_room_id}' (Event ID: {send_response.event_id})")
+                elif isinstance(send_response, RoomSendError):
+                    logging.error(f"[{source_chat}] Failed to post event to Matrix room '{target_room_id}': {send_response.message} (status code: {send_response.status_code})")
+                else:
+                    logging.error(f"[{source_chat}] Unknown response type when posting event to Matrix room '{target_room_id}': {send_response}")
+            except Exception as room_err:
+                logging.error(f"[{source_chat}] Error sending event to Matrix room '{target_room_id}': {room_err}")
+        return True
+    except Exception as e:
+        logging.error(f"[{source_chat}] General error during Matrix transfer of {filename}: {e}")
+        return False
+
 
 async def process_and_upload_media(message, source_chat, channel_name):
     """Process a single Telegram message and stream the media to Matrix"""
@@ -1049,151 +1471,212 @@ async def process_and_upload_media(message, source_chat, channel_name):
         if not is_safe:
             return
 
-    logging.info(f"[{source_chat}] Uploading to Matrix homeserver...")
-    
-    try:
-        # Upload main media using matrix-nio's built-in client method
-        upload_resp, _ = await matrix_client.upload(
-            io.BytesIO(media_bytes),
-            content_type=mime_type,
-            filename=filename,
-            filesize=len(media_bytes)
-        )
-        
-        if not isinstance(upload_resp, UploadResponse):
-            logging.error(f"[{source_chat}] Matrix server rejected upload! Response: {upload_resp}")
-            return
-            
-        content_uri = upload_resp.content_uri
-        logging.info(f"[{source_chat}] Upload successful! MXC-URI: {content_uri}. Sending room message...")
-        
-        msg_type = "m.image" if mime_type.startswith("image/") else "m.video"
+    # Thumbnail preparation for videos and images
+    msg_type = "m.image" if mime_type.startswith("image/") else "m.video"
+    thumb_url = None
+    thumb_info = None
+    blurhash_bytes = None
 
-        # Populate base info object with the exact file size of downloaded bytes
-        info_dict = {
-            "size": len(media_bytes),
-            "mimetype": mime_type,
-            "filename": filename
-        }
+    if msg_type in ("m.video", "m.image"):
+        try:
+            thumb_bytes = None
+            thumb_w = None
+            thumb_h = None
+            thumb_mime = None
 
-        # Extract additional metadata from Telegram attributes
-        if message.document and message.document.attributes:
-            for attr in message.document.attributes:
-                if hasattr(attr, 'duration') and attr.duration is not None:
-                    info_dict["duration"] = int(attr.duration * 1000)
-                if hasattr(attr, 'w') and attr.w is not None and hasattr(attr, 'h') and attr.h is not None:
-                    info_dict["w"] = int(attr.w)
-                    info_dict["h"] = int(attr.h)
-        elif message.photo and message.photo.sizes:
-            largest = message.photo.sizes[-1]
-            if hasattr(largest, 'w') and largest.w is not None and hasattr(largest, 'h') and largest.h is not None:
-                info_dict["w"] = int(largest.w)
-                info_dict["h"] = int(largest.h)
+            if msg_type == "m.image":
+                # Generate thumbnail locally in-memory to save bandwidth and get optimal dimensions
+                res = await asyncio.to_thread(generate_image_thumbnail, media_bytes)
+                if res:
+                    thumb_bytes, thumb_w, thumb_h, thumb_mime = res
+            else:
+                # For videos, download the high-resolution thumbnail from Telegram
+                t_bytes = await message.download_media(thumb=-1, file=bytes)
+                if t_bytes:
+                    probed = await asyncio.to_thread(probe_image, t_bytes)
+                    if probed:
+                        thumb_bytes = t_bytes
+                        thumb_w, thumb_h, thumb_mime = probed
 
-        # Thumbnail upload for videos and images
-        blurhash_bytes = None
-        if msg_type in ("m.video", "m.image"):
-            try:
-                thumb_bytes = None
-                thumb_w = None
-                thumb_h = None
-                thumb_mime = None
-
-                if msg_type == "m.image":
-                    # Generate thumbnail locally in-memory to save bandwidth and get optimal dimensions
-                    res = await asyncio.to_thread(generate_image_thumbnail, media_bytes)
-                    if res:
-                        thumb_bytes, thumb_w, thumb_h, thumb_mime = res
-                else:
-                    # For videos, download the high-resolution thumbnail from Telegram
-                    t_bytes = await message.download_media(thumb=-1, file=bytes)
-                    if t_bytes:
-                        probed = await asyncio.to_thread(probe_image, t_bytes)
-                        if probed:
-                            thumb_bytes = t_bytes
-                            thumb_w, thumb_h, thumb_mime = probed
-
-                if thumb_bytes:
-                    blurhash_bytes = thumb_bytes
-                    thumb_ext = thumb_mime.split('/', 1)[1]
-                    thumb_resp, _ = await matrix_client.upload(
-                        io.BytesIO(thumb_bytes),
-                        content_type=thumb_mime,
-                        filename=f"thumbnail.{thumb_ext}",
-                        filesize=len(thumb_bytes)
-                    )
-                    if isinstance(thumb_resp, UploadResponse):
-                        info_dict["thumbnail_url"] = thumb_resp.content_uri
-                        info_dict["thumbnail_info"] = {
-                            "mimetype": thumb_mime,
-                            "size": len(thumb_bytes),
-                            "w": thumb_w,
-                            "h": thumb_h
-                        }
-            except Exception as thumb_err:
-                logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
-
-        # The blurhash is always encoded from a thumbnail. Telegram did not always
-        # give us a usable one, so for images fall back to the full-size bytes and
-        # let compute_blurhash() downscale them itself. A video without a decodable
-        # thumbnail has no still frame Pillow can read, and gets no blurhash.
-        if blurhash_bytes is None and is_image:
-            blurhash_bytes = media_bytes
-
-        blurhash_str = None
-        if blurhash_bytes is not None:
-            blurhash_str = await asyncio.to_thread(compute_blurhash, blurhash_bytes)
-
-        # Build user-friendly metadata info (file size and dimensions if available)
-        size_bytes = len(media_bytes)
-        if size_bytes < 1024:
-            size_str = f"{size_bytes} B"
-        elif size_bytes < 1024 * 1024:
-            size_str = f"{size_bytes / 1024:.2f} KB"
-        else:
-            size_str = f"{size_bytes / (1024 * 1024):.2f} MB"
-
-        if info_dict and "w" in info_dict and "h" in info_dict:
-            meta_line = f"{info_dict['w']}x{info_dict['h']} {size_str}"
-        else:
-            meta_line = f"{size_str}"
-
-        body_text = meta_line
-        formatted_body_text = f'<font color="#888888"><small>{meta_line}</small></font>'
-
-        matrix_content = {
-            "msgtype": msg_type,
-            "body": body_text,
-            "url": content_uri,
-            "filename": filename,
-            "format": "org.matrix.custom.html",
-            "formatted_body": formatted_body_text,
-            "source": channel_name
-        }
-        if blurhash_str:
-            info_dict["xyz.amorgan.blurhash"] = blurhash_str
-
-        if info_dict:
-            matrix_content["info"] = info_dict
-
-        for target_room_id in MATRIX_ROOM_IDS:
-            try:
-                send_response = await matrix_client.room_send(
-                    room_id=target_room_id,
-                    message_type="m.room.message",
-                    content=matrix_content
+            if thumb_bytes:
+                blurhash_bytes = thumb_bytes
+                thumb_ext = thumb_mime.split('/', 1)[1]
+                thumb_resp, _ = await matrix_client.upload(
+                    io.BytesIO(thumb_bytes),
+                    content_type=thumb_mime,
+                    filename=f"thumbnail.{thumb_ext}",
+                    filesize=len(thumb_bytes)
                 )
-                if isinstance(send_response, RoomSendResponse):
-                    logging.info(f"[{source_chat}] Event successfully posted in Matrix room '{target_room_id}' (Event ID: {send_response.event_id})")
-                elif isinstance(send_response, RoomSendError):
-                    logging.error(f"[{source_chat}] Failed to post event to Matrix room '{target_room_id}': {send_response.message} (status code: {send_response.status_code})")
+                if isinstance(thumb_resp, UploadResponse):
+                    thumb_url = thumb_resp.content_uri
+                    thumb_info = {
+                        "mimetype": thumb_mime,
+                        "size": len(thumb_bytes),
+                        "w": thumb_w,
+                        "h": thumb_h
+                    }
+        except Exception as thumb_err:
+            logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
+
+    if blurhash_bytes is None and is_image:
+        blurhash_bytes = media_bytes
+
+    blurhash_str = None
+    if blurhash_bytes is not None:
+        blurhash_str = await asyncio.to_thread(compute_blurhash, blurhash_bytes)
+
+    # Extract additional metadata from Telegram attributes
+    orig_duration = None
+    orig_w = None
+    orig_h = None
+    if message.document and message.document.attributes:
+        for attr in message.document.attributes:
+            if hasattr(attr, 'duration') and attr.duration is not None:
+                orig_duration = float(attr.duration)
+            if hasattr(attr, 'w') and attr.w is not None and hasattr(attr, 'h') and attr.h is not None:
+                orig_w = int(attr.w)
+                orig_h = int(attr.h)
+    elif message.photo and message.photo.sizes:
+        largest = message.photo.sizes[-1]
+        if hasattr(largest, 'w') and largest.w is not None and hasattr(largest, 'h') and largest.h is not None:
+            orig_w = int(largest.w)
+            orig_h = int(largest.h)
+
+    # Handle oversized videos (if above configured limit)
+    if is_video and len(media_bytes) > MAX_MEDIA_SIZE_BYTES:
+        logging.info(
+            f"[{source_chat}] Oversized video ({round(len(media_bytes) / (1024 * 1024), 2)} MB > "
+            f"{MAX_MEDIA_SIZE_MB} MB). Action: {OVERSIZED_VIDEO_ACTION}..."
+        )
+
+        if OVERSIZED_VIDEO_ACTION == "split":
+            parts = await asyncio.to_thread(
+                split_video_lossless,
+                media_bytes,
+                filename,
+                MAX_MEDIA_SIZE_BYTES,
+                source_chat,
+                known_duration=orig_duration
+            )
+            if parts:
+                for p in parts:
+                    part_info = {
+                        "size": p["size"],
+                        "mimetype": mime_type,
+                        "filename": p["filename"]
+                    }
+                    if p.get("w") and p.get("h"):
+                        part_info["w"] = p["w"]
+                        part_info["h"] = p["h"]
+                    elif orig_w and orig_h:
+                        part_info["w"] = orig_w
+                        part_info["h"] = orig_h
+
+                    if p.get("duration_ms"):
+                        part_info["duration"] = p["duration_ms"]
+                    elif orig_duration:
+                        part_info["duration"] = int((orig_duration / len(parts)) * 1000)
+
+                    if thumb_url:
+                        part_info["thumbnail_url"] = thumb_url
+                        part_info["thumbnail_info"] = thumb_info
+
+                    await send_matrix_media_event(
+                        media_bytes=p["bytes"],
+                        mime_type=mime_type,
+                        filename=p["filename"],
+                        msg_type="m.video",
+                        info_dict=part_info,
+                        source_chat=source_chat,
+                        channel_name=channel_name,
+                        caption_prefix=f"Part {p['part_index']}/{p['total_parts']}",
+                        blurhash_str=blurhash_str
+                    )
+                return
+
+            if OVERSIZED_VIDEO_FALLBACK_COMPRESS:
+                logging.info(f"[{source_chat}] Lossless split produced no parts; falling back to compression...")
+                compressed = await asyncio.to_thread(
+                    compress_video,
+                    media_bytes,
+                    filename,
+                    MAX_MEDIA_SIZE_BYTES,
+                    source_chat,
+                    max_height=VIDEO_COMPRESSION_MAX_HEIGHT,
+                    preset=VIDEO_COMPRESSION_PRESET,
+                    crf=VIDEO_COMPRESSION_CRF,
+                    threads=VIDEO_COMPRESSION_THREADS
+                )
+                if compressed and compressed["size"] <= MAX_MEDIA_SIZE_BYTES:
+                    media_bytes = compressed["bytes"]
+                    filename = compressed["filename"]
+                    mime_type = "video/mp4"
+                    if compressed.get("duration_ms"):
+                        orig_duration = compressed["duration_ms"] / 1000.0
+                    if compressed.get("w") and compressed.get("h"):
+                        orig_w = compressed["w"]
+                        orig_h = compressed["h"]
                 else:
-                    logging.error(f"[{source_chat}] Unknown response type when posting event to Matrix room '{target_room_id}': {send_response}")
-            except Exception as room_err:
-                logging.error(f"[{source_chat}] Error sending event to Matrix room '{target_room_id}': {room_err}")
-            
-    except Exception as e:
-        logging.error(f"[{source_chat}] General error during Matrix transfer of {filename}: {e}")
+                    logging.warning(f"[{source_chat}] Video compression fallback failed or result still exceeds {MAX_MEDIA_SIZE_MB} MB. Skipping.")
+                    return
+            else:
+                logging.warning(f"[{source_chat}] Video could not be split below {MAX_MEDIA_SIZE_MB} MB. Skipping.")
+                return
+
+        elif OVERSIZED_VIDEO_ACTION == "compress":
+            compressed = await asyncio.to_thread(
+                compress_video,
+                media_bytes,
+                filename,
+                MAX_MEDIA_SIZE_BYTES,
+                source_chat,
+                max_height=VIDEO_COMPRESSION_MAX_HEIGHT,
+                preset=VIDEO_COMPRESSION_PRESET,
+                crf=VIDEO_COMPRESSION_CRF,
+                threads=VIDEO_COMPRESSION_THREADS
+            )
+            if compressed and compressed["size"] <= MAX_MEDIA_SIZE_BYTES:
+                media_bytes = compressed["bytes"]
+                filename = compressed["filename"]
+                mime_type = "video/mp4"
+                if compressed.get("duration_ms"):
+                    orig_duration = compressed["duration_ms"] / 1000.0
+                if compressed.get("w") and compressed.get("h"):
+                    orig_w = compressed["w"]
+                    orig_h = compressed["h"]
+            else:
+                logging.warning(f"[{source_chat}] Video compression failed or result still exceeds {MAX_MEDIA_SIZE_MB} MB. Skipping.")
+                return
+
+        elif OVERSIZED_VIDEO_ACTION == "skip":
+            logging.warning(f"[{source_chat}] Media skipped: Video ({round(len(media_bytes) / (1024 * 1024), 2)} MB) exceeds limit of {MAX_MEDIA_SIZE_MB} MB.")
+            return
+
+    # Standard upload for single media item
+    info_dict = {
+        "size": len(media_bytes),
+        "mimetype": mime_type,
+        "filename": filename
+    }
+    if orig_duration is not None:
+        info_dict["duration"] = int(orig_duration * 1000)
+    if orig_w is not None and orig_h is not None:
+        info_dict["w"] = orig_w
+        info_dict["h"] = orig_h
+    if thumb_url:
+        info_dict["thumbnail_url"] = thumb_url
+        info_dict["thumbnail_info"] = thumb_info
+
+    await send_matrix_media_event(
+        media_bytes=media_bytes,
+        mime_type=mime_type,
+        filename=filename,
+        msg_type=msg_type,
+        info_dict=info_dict,
+        source_chat=source_chat,
+        channel_name=channel_name,
+        blurhash_str=blurhash_str
+    )
 
 
 # --- THE CENTRAL HANDLER FOR EVERYTHING ---
@@ -1231,9 +1714,22 @@ async def master_handler(event):
     chat_identifier = f"{channel_display} ({event.chat_id})"
 
     file_size = event.message.file.size if event.message.file else 0
+    msg_is_video = is_video_message(event.message)
     if file_size > MAX_MEDIA_SIZE_BYTES:
-        logging.warning(f"[{chat_identifier}] Media skipped: File with {round(file_size / (1024 * 1024), 2)} MB exceeds limit of {MAX_MEDIA_SIZE_MB} MB.")
-        return
+        if msg_is_video and OVERSIZED_VIDEO_ACTION in ("split", "compress"):
+            if file_size > OVERSIZED_VIDEO_MAX_INPUT_BYTES:
+                logging.warning(
+                    f"[{chat_identifier}] Video skipped: File with {round(file_size / (1024 * 1024), 2)} MB "
+                    f"exceeds maximum allowed size for processing ({OVERSIZED_VIDEO_MAX_INPUT_MB} MB)."
+                )
+                return
+            logging.info(
+                f"[{chat_identifier}] Oversized video detected ({round(file_size / (1024 * 1024), 2)} MB > "
+                f"{MAX_MEDIA_SIZE_MB} MB). Will {OVERSIZED_VIDEO_ACTION} after download."
+            )
+        else:
+            logging.warning(f"[{chat_identifier}] Media skipped: File with {round(file_size / (1024 * 1024), 2)} MB exceeds limit of {MAX_MEDIA_SIZE_MB} MB.")
+            return
 
     if event.message.grouped_id is not None:
         album_id = event.message.grouped_id
@@ -1260,9 +1756,22 @@ async def master_handler(event):
                 for msg in reversed(filtered_messages):
                     if msg.media:
                         exact_size = msg.file.size if msg.file else 0
+                        item_is_video = is_video_message(msg)
                         if exact_size > MAX_MEDIA_SIZE_BYTES:
-                            logging.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({MAX_MEDIA_SIZE_MB} MB)")
-                            continue
+                            if item_is_video and OVERSIZED_VIDEO_ACTION in ("split", "compress"):
+                                if exact_size > OVERSIZED_VIDEO_MAX_INPUT_BYTES:
+                                    logging.warning(
+                                        f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) "
+                                        f"exceeds maximum allowed size for processing ({OVERSIZED_VIDEO_MAX_INPUT_MB} MB)"
+                                    )
+                                    continue
+                                logging.info(
+                                    f"[{chat_identifier}] Oversized video in album ({round(exact_size / (1024 * 1024), 2)} MB > "
+                                    f"{MAX_MEDIA_SIZE_MB} MB). Will {OVERSIZED_VIDEO_ACTION} after download."
+                                )
+                            else:
+                                logging.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({MAX_MEDIA_SIZE_MB} MB)")
+                                continue
                         
                     await process_and_upload_media(msg, chat_identifier, channel_display)
             except Exception as e:
@@ -1281,6 +1790,10 @@ async def main():
     logging.info(f"Bridge successfully started and active for channels: {TG_CHANNELS}")
     logging.info(f"Target Matrix rooms: {MATRIX_ROOM_IDS}")
     logging.info(f"Configured max media limit: {MAX_MEDIA_SIZE_MB} MB")
+    logging.info(
+        f"Oversized video action: {OVERSIZED_VIDEO_ACTION.upper()} "
+        f"(Max input: {OVERSIZED_VIDEO_MAX_INPUT_MB} MB, Fallback compress: {OVERSIZED_VIDEO_FALLBACK_COMPRESS})"
+    )
     logging.info(f"Configured min image limit: {MIN_IMAGE_SIZE_KB} KB ({round(MIN_IMAGE_SIZE_KB / 1024, 2)} MB)" if MIN_IMAGE_SIZE_KB > 0 else "Configured min image limit: None")
     logging.info(f"Configured min video limit: {MIN_VIDEO_SIZE_KB} KB ({round(MIN_VIDEO_SIZE_KB / 1024, 2)} MB)" if MIN_VIDEO_SIZE_KB > 0 else "Configured min video limit: None")
     logging.info(f"Images enabled: {ENABLE_IMAGES}")

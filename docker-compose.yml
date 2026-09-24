@@ -7,7 +7,8 @@ services:
       - ./app:/app
       - ./session_data:/app/session
     working_dir: /app
-    command: sh -c "pip install --no-cache-dir telethon matrix-nio av Pillow blurhash && python bridge.py"
+    shm_size: 1g
+    command: sh -c "apt-get update && apt-get install -y --no-install-recommends ffmpeg && pip install --no-cache-dir telethon matrix-nio av Pillow blurhash && python bridge.py"
     environment:
       - TG_API_ID=
       - TG_API_HASH=
@@ -19,6 +20,13 @@ services:
       - ALLOW_NON_ADMIN_STOP=false
       - TG_CHANNELS=
       - MAX_MEDIA_SIZE_MB=80
+      - OVERSIZED_VIDEO_ACTION=split
+      - OVERSIZED_VIDEO_MAX_INPUT_MB=250
+      - OVERSIZED_VIDEO_FALLBACK_COMPRESS=false
+      - VIDEO_COMPRESSION_MAX_HEIGHT=720
+      - VIDEO_COMPRESSION_PRESET=veryfast
+      - VIDEO_COMPRESSION_CRF=28
+      - VIDEO_COMPRESSION_THREADS=2
       - MIN_IMAGE_SIZE_KB=0
       - MIN_VIDEO_SIZE_KB=0
       - ENABLE_IMAGES=true
