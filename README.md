@@ -217,7 +217,6 @@ Edit the `docker-compose.yml` file and insert your configuration credentials:
 ```yaml
 services:
   telegram-matrix-bridge:
-    build: .
     image: ghcr.io/benjamin-aicheler/tgmediatomatrix:main
     container_name: tg_matrix_media_bridge
     restart: unless-stopped
