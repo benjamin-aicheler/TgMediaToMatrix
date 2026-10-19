@@ -610,8 +610,13 @@ def split_video_lossless(
                     os.remove(f)
                 except Exception:
                     pass
-            cmd[-2] = str(segment_time)
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            # Retry with a shorter segment time. Locate the argument by name: positional
+            # indices are unreliable here, because the optional -movflags pair shifts them
+            # and cmd[-2] addresses "+faststart" instead of the segment time.
+            cmd[cmd.index("-segment_time") + 1] = str(segment_time)
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if res.returncode != 0:
+                logging.error(f"[{source_chat}] FFmpeg split retry error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
             part_files = sorted([
                 os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
                 if f.startswith("part_") and f.endswith(ext)
@@ -702,7 +707,12 @@ def compress_video(
         ]
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if res.returncode != 0:
-            cmd[-3:-2] = ["-c:a", "aac", "-b:a", "128k"]
+            # Audio stream copy is not supported for every codec/container pair, so fall back
+            # to re-encoding the audio. Locate the argument by name: the previous positional
+            # slice (cmd[-3:-2]) replaced -movflags instead of -c:a and produced an invalid
+            # command that ffmpeg rejected outright.
+            audio_arg = cmd.index("-c:a")
+            cmd[audio_arg:audio_arg + 2] = ["-c:a", "aac", "-b:a", "128k"]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             if res.returncode != 0:
                 logging.error(f"[{source_chat}] FFmpeg compression failed: {res.stderr.decode('utf-8', errors='replace')[:400]}")
@@ -1422,7 +1432,9 @@ async def process_and_upload_media(message, source_chat, channel_name):
         ext = "mp4" if mime_type.startswith("video/") else "jpg"
         filename = f"telegram_media_{message.id}.{ext}"
 
-    file_size = message.file.size if message.file else 0
+    # Telethon reports None for the size of some media; treat it as unknown instead of
+    # letting the later ">" comparison raise TypeError.
+    file_size = (message.file.size if message.file else 0) or 0
     if is_image and MIN_IMAGE_SIZE_BYTES > 0 and file_size < MIN_IMAGE_SIZE_BYTES:
         logging.info(f"[{source_chat}] Skipping image {filename}: File size ({round(file_size / 1024, 2)} KB) is below minimum required size of {MIN_IMAGE_SIZE_KB} KB.")
         return
@@ -1464,6 +1476,17 @@ async def process_and_upload_media(message, source_chat, channel_name):
         logging.info(f"[{source_chat}] Skipping duplicate media {filename}: Content hash ({content_hash[:12]}...) was already forwarded within {DEDUPLICATION_TTL_MINUTES}m.")
         return
     media_deduplicator.mark_seen(content_key)
+
+    # Marks are set before processing on purpose: duplicates usually arrive seconds after
+    # the original, so releasing the mark only at the very end would let a repost that
+    # lands mid-processing slip through. The flip side is that a technical failure would
+    # suppress the media for the whole TTL, so every failure path below releases both
+    # marks again. Deliberate blocks (Llama Guard verdicts) keep them, so blocked content
+    # is not retried.
+    def release_dedup_marks():
+        if tg_media_id:
+            media_deduplicator.unmark(tg_media_id)
+        media_deduplicator.unmark(content_key)
 
     # Llama Guard Safety Check
     if LLAMAGUARD_API_URL:
@@ -1559,6 +1582,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
                 known_duration=orig_duration
             )
             if parts:
+                upload_failed = False
                 for p in parts:
                     part_info = {
                         "size": p["size"],
@@ -1581,7 +1605,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
                         part_info["thumbnail_url"] = thumb_url
                         part_info["thumbnail_info"] = thumb_info
 
-                    await send_matrix_media_event(
+                    sent = await send_matrix_media_event(
                         media_bytes=p["bytes"],
                         mime_type=mime_type,
                         filename=p["filename"],
@@ -1592,6 +1616,14 @@ async def process_and_upload_media(message, source_chat, channel_name):
                         caption_prefix=f"Part {p['part_index']}/{p['total_parts']}",
                         blurhash_str=blurhash_str
                     )
+                    if not sent:
+                        upload_failed = True
+                if upload_failed:
+                    logging.warning(
+                        f"[{source_chat}] At least one split part failed to reach Matrix; "
+                        f"releasing deduplication marks so a repost can be retried."
+                    )
+                    release_dedup_marks()
                 return
 
             if OVERSIZED_VIDEO_FALLBACK_COMPRESS:
@@ -1618,9 +1650,11 @@ async def process_and_upload_media(message, source_chat, channel_name):
                         orig_h = compressed["h"]
                 else:
                     logging.warning(f"[{source_chat}] Video compression fallback failed or result still exceeds {MAX_MEDIA_SIZE_MB} MB. Skipping.")
+                    release_dedup_marks()
                     return
             else:
                 logging.warning(f"[{source_chat}] Video could not be split below {MAX_MEDIA_SIZE_MB} MB. Skipping.")
+                release_dedup_marks()
                 return
 
         elif OVERSIZED_VIDEO_ACTION == "compress":
@@ -1646,6 +1680,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
                     orig_h = compressed["h"]
             else:
                 logging.warning(f"[{source_chat}] Video compression failed or result still exceeds {MAX_MEDIA_SIZE_MB} MB. Skipping.")
+                release_dedup_marks()
                 return
 
         elif OVERSIZED_VIDEO_ACTION == "skip":
@@ -1667,7 +1702,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
         info_dict["thumbnail_url"] = thumb_url
         info_dict["thumbnail_info"] = thumb_info
 
-    await send_matrix_media_event(
+    sent = await send_matrix_media_event(
         media_bytes=media_bytes,
         mime_type=mime_type,
         filename=filename,
@@ -1677,6 +1712,12 @@ async def process_and_upload_media(message, source_chat, channel_name):
         channel_name=channel_name,
         blurhash_str=blurhash_str
     )
+    if not sent:
+        logging.warning(
+            f"[{source_chat}] Media {filename} could not be delivered to Matrix; "
+            f"releasing deduplication marks so a repost can be retried."
+        )
+        release_dedup_marks()
 
 
 # --- THE CENTRAL HANDLER FOR EVERYTHING ---
@@ -1713,7 +1754,7 @@ async def master_handler(event):
 
     chat_identifier = f"{channel_display} ({event.chat_id})"
 
-    file_size = event.message.file.size if event.message.file else 0
+    file_size = (event.message.file.size if event.message.file else 0) or 0
     msg_is_video = is_video_message(event.message)
     if file_size > MAX_MEDIA_SIZE_BYTES:
         if msg_is_video and OVERSIZED_VIDEO_ACTION in ("split", "compress"):
@@ -1755,7 +1796,7 @@ async def master_handler(event):
                 logging.info(f"[{chat_identifier}] Processing {len(filtered_messages)} items from album {album_id}...")
                 for msg in reversed(filtered_messages):
                     if msg.media:
-                        exact_size = msg.file.size if msg.file else 0
+                        exact_size = (msg.file.size if msg.file else 0) or 0
                         item_is_video = is_video_message(msg)
                         if exact_size > MAX_MEDIA_SIZE_BYTES:
                             if item_is_video and OVERSIZED_VIDEO_ACTION in ("split", "compress"):
