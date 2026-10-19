@@ -5,7 +5,6 @@ services:
     restart: unless-stopped
     shm_size: 1g
     volumes:
-      - ./app:/app
       - ./session_data:/app/session
     environment:
       - TG_API_ID=
