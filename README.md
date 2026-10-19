@@ -64,6 +64,7 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `MAX_MEDIA_SIZE_MB` | Maximum size in MB to download and bridge directly | `80` (Default: `50`) |
 | `OVERSIZED_VIDEO_ACTION` | Action for videos exceeding `MAX_MEDIA_SIZE_MB`: `split` (lossless stream copy), `compress` (transcode), or `skip` | `split` (Default: `split`) |
 | `OVERSIZED_VIDEO_MAX_INPUT_MB` | Maximum file size in MB to download for oversized video processing | `250` (Default: `250`) |
+| `SHM_WAIT_TIMEOUT_SECONDS` | How long to wait for free ramdisk space before an oversized video is skipped (`0` = skip immediately) | `30` (Default: `30`) |
 | `OVERSIZED_VIDEO_FALLBACK_COMPRESS` | Fallback to compression if lossless splitting cannot find keyframes to split below limit | `false` (Default: `false`) |
 | `VIDEO_COMPRESSION_MAX_HEIGHT` | Maximum vertical resolution when compressing oversized videos | `720` (Default: `720`) |
 | `VIDEO_COMPRESSION_PRESET` | FFmpeg x264 preset (`ultrafast`, `veryfast`, `fast`, etc.) | `veryfast` (Default: `veryfast`) |
@@ -148,6 +149,8 @@ When Telegram channels post videos that exceed your configured `MAX_MEDIA_SIZE_M
 
 ### In-Memory RAM Disk (`/dev/shm`)
 To prevent SD card wear and ensure high-speed operations on single-board computers like the Raspberry Pi, intermediate temporary video files are processed directly in shared memory (`/dev/shm`, configured with `shm_size: 1g` in `docker-compose.yml`) and immediately purged after upload.
+
+The bridge never falls back to a disk directory. Before a split or compression run it reserves twice the video size plus 64 MB of headroom on the ramdisk, because the input file and the produced parts coexist there; if that does not fit, it waits up to `SHM_WAIT_TIMEOUT_SECONDS` (default `30`) for space to free up and otherwise skips the video with a log line, so a repost can be picked up later.
 
 ### Pre-Download Ceiling Protection
 To prevent downloading massive multi-gigabyte files that could exhaust RAM, the bridge checks the video's size from Telegram metadata *before* starting the download. Any video exceeding `OVERSIZED_VIDEO_MAX_INPUT_MB` (default `250` MB) is skipped immediately.
