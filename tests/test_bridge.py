@@ -84,6 +84,82 @@ def test_album_guard_window(bridge, monkeypatch):
     assert "album-1" not in bridge.PROCESSED_ALBUMS
 
 
+# --- Topic name cache ----------------------------------------------------------------
+
+
+class FakeTopicClient:
+    def __init__(self, names):
+        self.names = names
+        self.calls = []
+
+    async def __call__(self, request):
+        self.calls.append(request)
+        topic_id = request.topics[0]
+        return SimpleNamespace(topics=[SimpleNamespace(title=self.names[topic_id])])
+
+
+def test_topic_name_is_cached(bridge):
+    client = FakeTopicClient({7: "General"})
+    chat = SimpleNamespace(id=100)
+
+    assert run(bridge.get_topic_name(client, chat, 7)) == "General"
+    assert run(bridge.get_topic_name(client, chat, 7)) == "General"
+    assert len(client.calls) == 1
+
+
+def test_topic_name_without_topic_id_returns_none(bridge):
+    client = FakeTopicClient({})
+    assert run(bridge.get_topic_name(client, SimpleNamespace(id=100), None)) is None
+    assert client.calls == []
+
+
+def test_topic_name_falls_back_without_caching(bridge):
+    class FailingClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def __call__(self, request):
+            self.calls += 1
+            raise RuntimeError("API unavailable")
+
+    client = FailingClient()
+    chat = SimpleNamespace(id=100)
+
+    assert run(bridge.get_topic_name(client, chat, 42)) == "Topic 42"
+    assert run(bridge.get_topic_name(client, chat, 42)) == "Topic 42"
+    assert client.calls == 2
+    assert (100, 42) not in bridge.TOPIC_NAMES_CACHE
+
+
+def test_topic_cache_evicts_oldest_entry_at_capacity(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "TOPIC_NAMES_CACHE_SIZE", 2)
+    client = FakeTopicClient({1: "One", 2: "Two", 3: "Three"})
+    chat = SimpleNamespace(id=100)
+
+    for topic_id in (1, 2, 3):
+        run(bridge.get_topic_name(client, chat, topic_id))
+
+    assert len(bridge.TOPIC_NAMES_CACHE) == 2
+    assert (100, 1) not in bridge.TOPIC_NAMES_CACHE
+    assert (100, 2) in bridge.TOPIC_NAMES_CACHE
+    assert (100, 3) in bridge.TOPIC_NAMES_CACHE
+
+
+def test_topic_cache_keeps_recently_used_entry(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "TOPIC_NAMES_CACHE_SIZE", 2)
+    client = FakeTopicClient({1: "One", 2: "Two", 3: "Three"})
+    chat = SimpleNamespace(id=100)
+
+    run(bridge.get_topic_name(client, chat, 1))
+    run(bridge.get_topic_name(client, chat, 2))
+    run(bridge.get_topic_name(client, chat, 1))  # refresh entry 1
+    run(bridge.get_topic_name(client, chat, 3))  # evicts the least recently used
+
+    assert (100, 1) in bridge.TOPIC_NAMES_CACHE
+    assert (100, 2) not in bridge.TOPIC_NAMES_CACHE
+    assert (100, 3) in bridge.TOPIC_NAMES_CACHE
+
+
 # --- Safety verdicts -----------------------------------------------------------------
 
 
