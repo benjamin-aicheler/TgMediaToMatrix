@@ -908,7 +908,7 @@ SAFETY_STATS = {"blocked": 0, "unavailable": 0}
 DELIVERY_STATS = {"failed": 0, "partial": 0}
 
 
-async def get_image_safety_classification(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> tuple[bool | None, list[str]]:
+async def get_image_safety_classification(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None, mime_type: str = "image/jpeg") -> tuple[bool | None, list[str]]:
     """
     Calls Llama Guard API for a single image/frame.
     Returns (is_safe, violated_categories) where:
@@ -924,7 +924,10 @@ async def get_image_safety_classification(image_bytes: bytes, source_chat: str, 
         import json
 
         b64_data = base64.b64encode(image_bytes).decode('utf-8')
-        image_url = f"data:image/jpeg;base64,{b64_data}"
+        # The data URL must describe the actual encoding: announcing PNG/WebP bytes as
+        # image/jpeg makes the vision model decode garbage or reject the request.
+        safe_mime = mime_type if mime_type and mime_type.startswith("image/") else "image/jpeg"
+        image_url = f"data:{safe_mime};base64,{b64_data}"
         
         prompt_text = """Task: Check if there is unsafe content in 'User' messages in conversations according to our safety policy with the below categories.
 
@@ -1034,13 +1037,13 @@ Provide your safety assessment for ONLY THE LAST User in the above conversation:
         return None, []
 
 
-async def check_single_image_safety(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> SafetyVerdict:
+async def check_single_image_safety(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None, mime_type: str = "image/jpeg") -> SafetyVerdict:
     """
     Checks the safety of a single image/frame against the Llama Guard API.
     Returns SAFE if the media may pass, BLOCKED if policy rejects it, UNAVAILABLE if the
     classifier could not be reached (fail-closed, retryable).
     """
-    is_safe, violated = await get_image_safety_classification(image_bytes, source_chat, filename, index_label)
+    is_safe, violated = await get_image_safety_classification(image_bytes, source_chat, filename, index_label, mime_type)
     if is_safe is None:
         return SafetyVerdict.UNAVAILABLE
         
@@ -1103,7 +1106,9 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
         return SafetyVerdict.UNAVAILABLE
 
     if len(image_list) == 1:
-        return await check_single_image_safety(image_list[0], source_chat, filename)
+        # Extracted video frames are always JPEG, whatever the container's mime type says.
+        single_mime = mime_type if mime_type.startswith("image/") else "image/jpeg"
+        return await check_single_image_safety(image_list[0], source_chat, filename, mime_type=single_mime)
 
     # Spawn parallel safety checks for all extracted video frames
     tasks = []
