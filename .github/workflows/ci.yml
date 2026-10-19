@@ -14,11 +14,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Ruff (F, E9, B, LOG)
+      - name: Ruff (F, E9, B, LOG, BLE)
         uses: astral-sh/ruff-action@v3
         with:
           version: "0.17.1"
-          args: "check --select F,E9,B,LOG --output-format concise"
+          args: "check --select F,E9,B,LOG,BLE --output-format concise"
 
   test:
     runs-on: ubuntu-latest

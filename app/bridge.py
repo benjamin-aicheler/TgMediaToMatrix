@@ -129,7 +129,7 @@ try:
         try:
             import imageio_ffmpeg
             FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
-        except Exception:
+        except (ImportError, OSError, RuntimeError):
             pass
 
     if OVERSIZED_VIDEO_ACTION in ("split", "compress") and not FFMPEG_PATH:
@@ -372,7 +372,7 @@ async def get_topic_name(client, chat_entity, topic_id):
             while len(TOPIC_NAMES_CACHE) > TOPIC_NAMES_CACHE_SIZE:
                 TOPIC_NAMES_CACHE.popitem(last=False)
             return name
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - Telethon RPC errors share no narrow base; a missing name is not fatal
         logger.debug(f"Could not fetch topic name for topic {topic_id} in {chat_entity.id}: {e}")
         
     return f"Topic {topic_id}"
@@ -409,7 +409,7 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
                 try:
                     total_seconds = float(duration * time_base)
                     total_frames = int(total_seconds * float(average_rate))
-                except Exception:
+                except (TypeError, ValueError, OverflowError):
                     total_frames = 0
         
         # If total_frames is not available, try to decode up to some reasonable limit or read first frames
@@ -458,13 +458,13 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
                 frames_bytes.append(img_bytes_io.getvalue())
                 break
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - PyAV/Pillow raise library-specific errors; no frames just disables the check
         logger.error(f"Failed to extract frames from video: {e}")
     finally:
         if container is not None:
             try:
                 container.close()
-            except Exception:
+            except Exception:  # noqa: BLE001 - closing a broken container may raise anything; the frames are already collected
                 pass
     return frames_bytes
 
@@ -566,7 +566,7 @@ def ffprobe_stdout(ffprobe_bin: str, args: list[str], timeout: float = FFPROBE_T
             [ffprobe_bin, "-v", "error", *args],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=timeout
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return None
     if res.returncode != 0:
         return None
@@ -604,7 +604,7 @@ def probe_video_duration(video_path: str, ffmpeg_bin: str) -> float | None:
         container.close()
         if dur and dur > 0:
             return dur
-    except Exception:
+    except Exception:  # noqa: BLE001 - av fallback for duration: any library failure means the value is unknown
         pass
 
     return None
@@ -636,7 +636,7 @@ def probe_video_dimensions(video_path: str, ffmpeg_bin: str) -> tuple[int, int] 
                 container.close()
                 return dims
         container.close()
-    except Exception:
+    except Exception:  # noqa: BLE001 - av fallback for dimensions: any library failure means the value is unknown
         pass
 
     return None
@@ -716,7 +716,7 @@ def split_video_lossless(
             for f in part_files:
                 try:
                     os.remove(f)
-                except Exception:
+                except OSError:
                     pass
             # Retry with a shorter segment time. Locate the argument by name: positional
             # indices are unreliable here, because the optional -movflags pair shifts them
@@ -888,7 +888,7 @@ def probe_image(image_bytes: bytes) -> tuple[int, int, str] | None:
             if not mime or width < 1 or height < 1:
                 return None
             return int(width), int(height), mime
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.debug(f"Could not probe thumbnail bytes: {e}")
         return None
 
@@ -939,7 +939,7 @@ def generate_image_thumbnail(image_bytes: bytes, max_size: int = 800) -> tuple[b
             save_format = img.format if img.format in ("PNG", "WEBP") else "JPEG"
             img.save(out, format=save_format, quality=85, optimize=True)
             return out.getvalue(), width, height, mime
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.debug(f"Could not generate image thumbnail: {e}")
         return None
 
@@ -978,7 +978,7 @@ def compute_blurhash(image_bytes: bytes) -> str | None:
             for y in range(height)
         ]
         return blurhash.encode(rows, BLURHASH_COMPONENTS_X, BLURHASH_COMPONENTS_Y)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - blurhash encodes arbitrary bytes and the hash is cosmetic
         logger.debug(f"Could not compute blurhash: {e}")
         return None
 
@@ -1129,7 +1129,7 @@ Provide your safety assessment for ONLY THE LAST User in the above conversation:
             logger.error(f"[{source_chat}]{label_prefix} Llama Guard returned unexpected status '{status}'.")
             return None, []
             
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - any classifier failure must fail closed
         logger.error(f"[{source_chat}]{label_prefix} Error during Llama Guard safety check: {e}")
         return None, []
 
@@ -1299,7 +1299,7 @@ async def send_matrix_notice(room_id: str, plain_text: str, html_text: str):
             message_type="m.room.message",
             content=content
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - a failed notice must not break command handling
         logger.error(f"Failed to send Matrix command response notice: {e}")
 
 
@@ -1544,7 +1544,7 @@ async def send_matrix_media_event(
                 else:
                     failed_rooms.append(target_room_id)
                     logger.error(f"[{source_chat}] Unknown response type when posting event to Matrix room '{target_room_id}': {send_response}")
-            except Exception as room_err:
+            except Exception as room_err:  # noqa: BLE001 - one broken room must not stop the remaining rooms
                 failed_rooms.append(target_room_id)
                 logger.error(f"[{source_chat}] Error sending event to Matrix room '{target_room_id}': {room_err}")
 
@@ -1565,7 +1565,7 @@ async def send_matrix_media_event(
                 f"failed: {', '.join(failed_rooms)}."
             )
         return True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - the upload path reports failure to its caller instead of raising
         logger.error(f"[{source_chat}] General error during Matrix transfer of {filename}: {e}")
         return False
 
@@ -1628,7 +1628,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
             if tg_media_id:
                 media_deduplicator.unmark(tg_media_id)
             return
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - download errors must release the deduplication marks
         logger.error(f"[{source_chat}] Critical error during Telegram download: {e}")
         if tg_media_id:
             media_deduplicator.unmark(tg_media_id)
@@ -1720,7 +1720,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
                         "w": thumb_w,
                         "h": thumb_h
                     }
-        except Exception as thumb_err:
+        except Exception as thumb_err:  # noqa: BLE001 - thumbnails are optional, the media is sent either way
             logger.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
     if blurhash_bytes is None and is_image:
@@ -2008,7 +2008,7 @@ async def master_handler(event):
                             continue
 
                 await process_and_upload_media(msg, chat_identifier, channel_display)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - one broken album must not kill the update loop
             logger.error(f"[{chat_identifier}] Error loading album {album_id}: {e}")
     else:
         await process_and_upload_media(event.message, chat_identifier, channel_display)
@@ -2069,7 +2069,7 @@ async def matrix_sync_loop():
             await matrix_client.sync_forever(timeout=30000, full_state=False)
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - the sync loop must survive arbitrary network and library errors
             logger.error(f"Matrix sync stopped with an error: {e!r}")
         else:
             if MATRIX_SYNC_AUTH_FAILED:
