@@ -10,7 +10,7 @@ import logging
 import hashlib
 from collections import OrderedDict
 from telethon import TelegramClient, events
-from nio import AsyncClient, UploadResponse, RoomSendResponse, RoomSendError, RoomMessageText
+from nio import AsyncClient, UploadResponse, RoomSendResponse, RoomSendError, RoomMessageText, SyncError
 
 # Set up professional logging format
 logging.basicConfig(
@@ -1837,6 +1837,78 @@ async def master_handler(event):
         await process_and_upload_media(event.message, chat_identifier, channel_display)
 
 
+# --- Matrix sync supervision -------------------------------------------------------------
+# nio handles HTTP errors by returning SyncError objects instead of raising them, so without a
+# response callback a rejected access token would silently disable the command listener while
+# sync_forever keeps looping. Transport errors, on the other hand, propagate out of
+# sync_forever and end the task for good. Both cases are handled here.
+MATRIX_SYNC_INITIAL_BACKOFF_SECONDS = 5
+MATRIX_SYNC_MAX_BACKOFF_SECONDS = 300
+MATRIX_SYNC_STABLE_SECONDS = 60
+
+# Set once the homeserver rejected our access token; retrying cannot fix that.
+MATRIX_SYNC_AUTH_FAILED = False
+
+
+async def on_matrix_response(response):
+    """Surface sync errors and stop the loop when the access token is no longer accepted."""
+    global MATRIX_SYNC_AUTH_FAILED
+
+    if not isinstance(response, SyncError):
+        return
+
+    status = str(response.status_code or "")
+    message = str(response.message or "")
+    is_auth_error = (
+        status in ("401", "403")
+        or "M_UNKNOWN_TOKEN" in message
+        or "M_MISSING_TOKEN" in message
+        or getattr(response, "soft_logout", False)
+    )
+
+    if not is_auth_error:
+        logging.error(f"Matrix sync error: {status} {message}".strip())
+        return
+
+    if MATRIX_SYNC_AUTH_FAILED:
+        return
+
+    MATRIX_SYNC_AUTH_FAILED = True
+    logging.critical(
+        f"Matrix rejected the access token ({status} {message}). Interactive commands stay "
+        f"disabled until MATRIX_ACCESS_TOKEN is replaced and the bridge is restarted."
+    )
+    # Without this, sync_forever would keep polling a server that answers 401 as fast as it can.
+    matrix_client.stop_sync_forever()
+
+
+async def matrix_sync_loop():
+    """Run sync_forever, restarting it with exponential backoff after a failure."""
+    backoff = MATRIX_SYNC_INITIAL_BACKOFF_SECONDS
+
+    while True:
+        started = time.monotonic()
+        try:
+            await matrix_client.sync_forever(timeout=30000, full_state=False)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.error(f"Matrix sync stopped with an error: {e!r}")
+        else:
+            if MATRIX_SYNC_AUTH_FAILED:
+                logging.error("Matrix sync supervisor stopping: the access token was rejected.")
+                return
+            logging.warning("Matrix sync loop returned unexpectedly.")
+
+        ran_for = time.monotonic() - started
+        if ran_for >= MATRIX_SYNC_STABLE_SECONDS:
+            backoff = MATRIX_SYNC_INITIAL_BACKOFF_SECONDS
+
+        logging.info(f"Restarting Matrix sync in {backoff}s (last run lasted {ran_for:.0f}s).")
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, MATRIX_SYNC_MAX_BACKOFF_SECONDS)
+
+
 async def main():
     logging.info("Starting Telegram client...")
     await tg_client.start()
@@ -1857,7 +1929,8 @@ async def main():
     if ADMIN_MATRIX_USER_ID or ALLOW_NON_ADMIN_STOP:
         logging.info(f"Matrix command listener active (Admin User: {ADMIN_MATRIX_USER_ID or 'None'}, Allow Non-Admin Stop: {ALLOW_NON_ADMIN_STOP})")
         matrix_client.add_event_callback(on_matrix_message, RoomMessageText)
-        matrix_sync_task = asyncio.create_task(matrix_client.sync_forever(timeout=30000, full_state=False))
+        matrix_client.add_response_callback(on_matrix_response, SyncError)
+        matrix_sync_task = asyncio.create_task(matrix_sync_loop())
     else:
         logging.info("Admin Matrix user (ADMIN_MATRIX_USER_ID) and ALLOW_NON_ADMIN_STOP not configured. Dynamic chat commands disabled.")
 
