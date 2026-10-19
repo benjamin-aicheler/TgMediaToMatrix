@@ -5,9 +5,12 @@ covered by hand on the real container instead.
 """
 
 import asyncio
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import nio
+import pytest
 
 
 def run(coro):
@@ -401,3 +404,85 @@ def test_reserve_shm_gives_up_after_timeout(bridge, monkeypatch):
     monkeypatch.setattr(bridge, "shm_space", lambda: (10**9, 0))
     monkeypatch.setattr(bridge, "SHM_WAIT_TIMEOUT_SECONDS", 0)
     assert run(bridge.reserve_shm_space(4096, "chat", "a.mp4")) is False
+
+
+# --- ffprobe helpers -----------------------------------------------------------------
+
+
+def make_fake_ffprobe(tmp_path, output, exit_code=0):
+    """Writes an executable stub that behaves like `ffprobe -v error ...` for one case."""
+    script = tmp_path / "ffprobe"
+    script.write_text(f"#!/bin/sh\nprintf '%s\\n' '{output}'\nexit {exit_code}\n")
+    script.chmod(0o755)
+    return script
+
+
+def test_find_ffprobe_prefers_path(bridge, monkeypatch):
+    monkeypatch.setattr(bridge.shutil, "which", lambda name: "/usr/bin/ffprobe")
+    assert bridge.find_ffprobe("/usr/bin/ffmpeg") == "/usr/bin/ffprobe"
+
+
+def test_find_ffprobe_uses_ffmpeg_directory(bridge, monkeypatch, tmp_path):
+    monkeypatch.setattr(bridge.shutil, "which", lambda name: None)
+    ffmpeg_bin = tmp_path / "ffmpeg"
+    ffmpeg_bin.write_text("#!/bin/sh\n")
+    ffprobe_bin = tmp_path / "ffprobe"
+    ffprobe_bin.write_text("#!/bin/sh\n")
+
+    assert bridge.find_ffprobe(str(ffmpeg_bin)) == str(ffprobe_bin)
+
+
+def test_find_ffprobe_returns_none_when_missing(bridge, monkeypatch):
+    monkeypatch.setattr(bridge.shutil, "which", lambda name: None)
+    assert bridge.find_ffprobe(None) is None
+    assert bridge.find_ffprobe("/nonexistent/ffmpeg") is None
+
+
+def test_probe_duration_parses_ffprobe_output(bridge, monkeypatch, tmp_path):
+    monkeypatch.setattr(bridge, "find_ffprobe", lambda ffmpeg_bin: str(make_fake_ffprobe(tmp_path, "2.5")))
+    assert bridge.probe_video_duration("a.mp4", None) == pytest.approx(2.5)
+
+
+def test_probe_duration_ignores_unparsable_output(bridge, monkeypatch, tmp_path):
+    monkeypatch.setattr(bridge, "find_ffprobe", lambda ffmpeg_bin: str(make_fake_ffprobe(tmp_path, "N/A")))
+    assert bridge.probe_video_duration("a.mp4", None) is None
+
+
+def test_probe_duration_ignores_failed_ffprobe(bridge, monkeypatch, tmp_path):
+    script = make_fake_ffprobe(tmp_path, "2.5", exit_code=1)
+    monkeypatch.setattr(bridge, "find_ffprobe", lambda ffmpeg_bin: str(script))
+    assert bridge.probe_video_duration("a.mp4", None) is None
+
+
+def test_probe_dimensions_parses_ffprobe_output(bridge, monkeypatch, tmp_path):
+    monkeypatch.setattr(bridge, "find_ffprobe", lambda ffmpeg_bin: str(make_fake_ffprobe(tmp_path, "320x240")))
+    assert bridge.probe_video_dimensions("a.mp4", None) == (320, 240)
+
+
+def test_probe_dimensions_ignores_unparsable_output(bridge, monkeypatch, tmp_path):
+    monkeypatch.setattr(bridge, "find_ffprobe", lambda ffmpeg_bin: str(make_fake_ffprobe(tmp_path, "nonsense")))
+    assert bridge.probe_video_dimensions("a.mp4", None) is None
+
+    monkeypatch.setattr(bridge, "find_ffprobe", lambda ffmpeg_bin: str(make_fake_ffprobe(tmp_path, "320")))
+    assert bridge.probe_video_dimensions("a.mp4", None) is None
+
+
+@pytest.mark.skipif(
+    shutil.which("ffprobe") is None or shutil.which("ffmpeg") is None,
+    reason="needs a real ffmpeg/ffprobe installation",
+)
+def test_probe_against_a_real_video(bridge, tmp_path):
+    clip = tmp_path / "clip.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-f", "lavfi",
+            "-i", "testsrc=duration=2:size=320x240:rate=10",
+            "-pix_fmt", "yuv420p", "-c:v", "libx264", str(clip), "-y",
+        ],
+        check=True,
+        timeout=60,
+    )
+
+    duration = bridge.probe_video_duration(str(clip), shutil.which("ffmpeg"))
+    assert duration == pytest.approx(2.0, abs=0.1)
+    assert bridge.probe_video_dimensions(str(clip), shutil.which("ffmpeg")) == (320, 240)

@@ -542,25 +542,50 @@ async def reserve_shm_space(required_bytes: int, source_chat: str, filename: str
     return False
 
 
-def probe_video_duration(video_path: str, ffmpeg_bin: str) -> float | None:
-    """Probes the video duration in seconds using ffprobe or av."""
+FFPROBE_TIMEOUT_SECONDS = 5
+
+
+def find_ffprobe(ffmpeg_bin: str | None) -> str | None:
+    """Locates ffprobe: first on PATH, then next to the resolved ffmpeg binary."""
     ffprobe_bin = shutil.which("ffprobe")
     if not ffprobe_bin and ffmpeg_bin:
         candidate = os.path.join(os.path.dirname(ffmpeg_bin), "ffprobe")
         if os.path.exists(candidate):
             ffprobe_bin = candidate
+    return ffprobe_bin
+
+
+def ffprobe_stdout(ffprobe_bin: str, args: list[str], timeout: float = FFPROBE_TIMEOUT_SECONDS) -> str | None:
+    """Runs ffprobe and returns the stripped stdout, or None when it produced nothing usable."""
+    try:
+        res = subprocess.run(
+            [ffprobe_bin, "-v", "error", *args],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=timeout
+        )
+    except Exception:
+        return None
+    if res.returncode != 0:
+        return None
+    output = res.stdout.strip()
+    return output or None
+
+
+def probe_video_duration(video_path: str, ffmpeg_bin: str) -> float | None:
+    """Probes the video duration in seconds using ffprobe or av."""
+    ffprobe_bin = find_ffprobe(ffmpeg_bin)
     if ffprobe_bin:
-        try:
-            res = subprocess.run(
-                [ffprobe_bin, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=5
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                val = float(res.stdout.strip())
+        output = ffprobe_stdout(ffprobe_bin, [
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ])
+        if output:
+            try:
+                val = float(output)
                 if val > 0:
                     return val
-        except Exception:
-            pass
+            except ValueError:
+                pass
 
     try:
         import av
@@ -583,22 +608,20 @@ def probe_video_duration(video_path: str, ffmpeg_bin: str) -> float | None:
 
 def probe_video_dimensions(video_path: str, ffmpeg_bin: str) -> tuple[int, int] | None:
     """Probes video width and height using ffprobe or av."""
-    ffprobe_bin = shutil.which("ffprobe")
-    if not ffprobe_bin and ffmpeg_bin:
-        candidate = os.path.join(os.path.dirname(ffmpeg_bin), "ffprobe")
-        if os.path.exists(candidate):
-            ffprobe_bin = candidate
+    ffprobe_bin = find_ffprobe(ffmpeg_bin)
     if ffprobe_bin:
-        try:
-            res = subprocess.run(
-                [ffprobe_bin, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", video_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=5
-            )
-            if res.returncode == 0 and "x" in res.stdout:
-                w_str, h_str = res.stdout.strip().split("x", 1)
-                return int(w_str), int(h_str)
-        except Exception:
-            pass
+        output = ffprobe_stdout(ffprobe_bin, [
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=s=x:p=0",
+            video_path,
+        ])
+        if output and "x" in output:
+            try:
+                width_str, height_str = output.split("x", 1)
+                return int(width_str), int(height_str)
+            except ValueError:
+                pass
 
     try:
         import av
