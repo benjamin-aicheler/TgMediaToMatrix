@@ -904,6 +904,9 @@ class SafetyVerdict(Enum):
 # stay invisible between the individual error lines.
 SAFETY_STATS = {"blocked": 0, "unavailable": 0}
 
+# Counters for media that did not reach (all|some) destination rooms, also shown by "!tmmb status".
+DELIVERY_STATS = {"failed": 0, "partial": 0}
+
 
 async def get_image_safety_classification(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> tuple[bool | None, list[str]]:
     """
@@ -1285,7 +1288,8 @@ async def on_matrix_message(room, event: RoomMessageText):
             f"- Videos: {'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}\n"
             f"- Oversized Videos: {OVERSIZED_VIDEO_ACTION.upper()} (Limit: {MAX_MEDIA_SIZE_MB}MB, Ceiling: {OVERSIZED_VIDEO_MAX_INPUT_MB}MB)\n"
             f"- Deduplication: {'ENABLED' if DEDUPLICATION_ENABLED else 'DISABLED'} (TTL: {DEDUPLICATION_TTL_MINUTES}m, Cache: {len(media_deduplicator._cache)}/{DEDUPLICATION_CACHE_SIZE})\n"
-            f"- Safety: {'ENABLED' if LLAMAGUARD_API_URL else 'DISABLED'} (Blocked: {SAFETY_STATS['blocked']}, Unavailable: {SAFETY_STATS['unavailable']})"
+            f"- Safety: {'ENABLED' if LLAMAGUARD_API_URL else 'DISABLED'} (Blocked: {SAFETY_STATS['blocked']}, Unavailable: {SAFETY_STATS['unavailable']})\n"
+            f"- Delivery: {DELIVERY_STATS['partial']} partial, {DELIVERY_STATS['failed']} failed (since start)"
         )
         status_html = (
             f"<strong>[TgMediaToMatrix] Current Status:</strong><br/>"
@@ -1293,7 +1297,8 @@ async def on_matrix_message(room, event: RoomMessageText):
             f"• Videos: <code>{'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}</code><br/>"
             f"• Oversized Videos: <code>{OVERSIZED_VIDEO_ACTION.upper()}</code> (Limit: {MAX_MEDIA_SIZE_MB}MB, Ceiling: {OVERSIZED_VIDEO_MAX_INPUT_MB}MB)<br/>"
             f"• Deduplication: <code>{'ENABLED' if DEDUPLICATION_ENABLED else 'DISABLED'}</code> (TTL: {DEDUPLICATION_TTL_MINUTES}m, Cache: {len(media_deduplicator._cache)}/{DEDUPLICATION_CACHE_SIZE})<br/>"
-            f"• Safety: <code>{'ENABLED' if LLAMAGUARD_API_URL else 'DISABLED'}</code> (Blocked: {SAFETY_STATS['blocked']}, Unavailable: {SAFETY_STATS['unavailable']})"
+            f"• Safety: <code>{'ENABLED' if LLAMAGUARD_API_URL else 'DISABLED'}</code> (Blocked: {SAFETY_STATS['blocked']}, Unavailable: {SAFETY_STATS['unavailable']})<br/>"
+            f"• Delivery: {DELIVERY_STATS['partial']} partial, {DELIVERY_STATS['failed']} failed (since start)"
         )
         await send_matrix_notice(room.room_id, status_plain, status_html)
         return
@@ -1419,6 +1424,8 @@ async def send_matrix_media_event(
         if info_dict:
             matrix_content["info"] = info_dict
 
+        delivered_rooms = []
+        failed_rooms = []
         for target_room_id in MATRIX_ROOM_IDS:
             try:
                 send_response = await matrix_client.room_send(
@@ -1427,13 +1434,34 @@ async def send_matrix_media_event(
                     content=matrix_content
                 )
                 if isinstance(send_response, RoomSendResponse):
+                    delivered_rooms.append(target_room_id)
                     logging.info(f"[{source_chat}] Event successfully posted in Matrix room '{target_room_id}' (Event ID: {send_response.event_id})")
                 elif isinstance(send_response, RoomSendError):
+                    failed_rooms.append(target_room_id)
                     logging.error(f"[{source_chat}] Failed to post event to Matrix room '{target_room_id}': {send_response.message} (status code: {send_response.status_code})")
                 else:
+                    failed_rooms.append(target_room_id)
                     logging.error(f"[{source_chat}] Unknown response type when posting event to Matrix room '{target_room_id}': {send_response}")
             except Exception as room_err:
+                failed_rooms.append(target_room_id)
                 logging.error(f"[{source_chat}] Error sending event to Matrix room '{target_room_id}': {room_err}")
+
+        # Report the real outcome: the caller uses this to decide whether a repost may be retried.
+        if not delivered_rooms:
+            DELIVERY_STATS["failed"] += 1
+            logging.error(
+                f"[{source_chat}] {filename} reached none of the {len(MATRIX_ROOM_IDS)} configured room(s) "
+                f"({', '.join(failed_rooms) if failed_rooms else 'no rooms configured'}). "
+                f"Reporting failure so the caller can release the deduplication marks."
+            )
+            return False
+
+        if failed_rooms:
+            DELIVERY_STATS["partial"] += 1
+            logging.warning(
+                f"[{source_chat}] {filename} reached {len(delivered_rooms)}/{len(MATRIX_ROOM_IDS)} rooms; "
+                f"failed: {', '.join(failed_rooms)}."
+            )
         return True
     except Exception as e:
         logging.error(f"[{source_chat}] General error during Matrix transfer of {filename}: {e}")
