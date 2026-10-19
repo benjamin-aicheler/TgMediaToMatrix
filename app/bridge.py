@@ -9,6 +9,7 @@ import asyncio
 import logging
 import hashlib
 from collections import OrderedDict
+from enum import Enum
 from telethon import TelegramClient, events
 from nio import AsyncClient, UploadResponse, RoomSendResponse, RoomSendError, RoomMessageText, SyncError
 
@@ -885,6 +886,25 @@ def compute_blurhash(image_bytes: bytes) -> str | None:
         return None
 
 
+class SafetyVerdict(Enum):
+    """Outcome of a safety classification.
+
+    BLOCKED and UNAVAILABLE both keep the media off Matrix, but for different reasons:
+    BLOCKED is a deliberate verdict, so the content is never retried; UNAVAILABLE means the
+    classifier produced no verdict at all - fail-closed for this attempt, but a repost may
+    well succeed later.
+    """
+
+    SAFE = "safe"
+    BLOCKED = "blocked"
+    UNAVAILABLE = "unavailable"
+
+
+# Counters since start-up, surfaced by "!tmmb status" so that a classifier outage does not
+# stay invisible between the individual error lines.
+SAFETY_STATS = {"blocked": 0, "unavailable": 0}
+
+
 async def get_image_safety_classification(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> tuple[bool | None, list[str]]:
     """
     Calls Llama Guard API for a single image/frame.
@@ -1011,14 +1031,15 @@ Provide your safety assessment for ONLY THE LAST User in the above conversation:
         return None, []
 
 
-async def check_single_image_safety(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> bool:
+async def check_single_image_safety(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None) -> SafetyVerdict:
     """
     Checks the safety of a single image/frame against the Llama Guard API.
-    Returns True if safe/allowed to pass, False if unsafe/blocked.
+    Returns SAFE if the media may pass, BLOCKED if policy rejects it, UNAVAILABLE if the
+    classifier could not be reached (fail-closed, retryable).
     """
     is_safe, violated = await get_image_safety_classification(image_bytes, source_chat, filename, index_label)
     if is_safe is None:
-        return False  # Block on API error / fail-closed
+        return SafetyVerdict.UNAVAILABLE
         
     label_prefix = f" [{index_label}]" if index_label else ""
     
@@ -1028,40 +1049,41 @@ async def check_single_image_safety(image_bytes: bytes, source_chat: str, filena
             overlap = [c for c in violated if c in LLAMAGUARD_CHECKS]
             if overlap:
                 logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates configured Llama Guard categories: {overlap}")
-                return False
+                return SafetyVerdict.BLOCKED
 
         # 2. Required-list check (LLAMAGUARD_REQUIRE_CHECKS)
         if LLAMAGUARD_REQUIRE_CHECKS:
             required_overlap = [c for c in violated if c in LLAMAGUARD_REQUIRE_CHECKS]
             if not required_overlap:
                 logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as unsafe ({violated}), but does not match any required categories: {LLAMAGUARD_REQUIRE_CHECKS}")
-                return False
+                return SafetyVerdict.BLOCKED
             else:
                 logging.info(f"[{source_chat}]{label_prefix} Media matches required safety check: {required_overlap}. Passing.")
-                return True
+                return SafetyVerdict.SAFE
 
         # 3. Default behavior if no required-list and no block-list overlap
         if LLAMAGUARD_CHECKS:
             logging.info(f"[{source_chat}]{label_prefix} Media classified as unsafe ({violated}), but none are in configured important checks ({LLAMAGUARD_CHECKS}). Passing.")
-            return True
+            return SafetyVerdict.SAFE
         else:
             logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates Llama Guard categories: {violated}")
-            return False
+            return SafetyVerdict.BLOCKED
             
     else:  # safe
         if LLAMAGUARD_REQUIRE_CHECKS:
             logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as safe, but does not match any required unsafe categories: {LLAMAGUARD_REQUIRE_CHECKS}")
-            return False
-        return True
+            return SafetyVerdict.BLOCKED
+        return SafetyVerdict.SAFE
 
 
-async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: str, filename: str) -> bool:
+async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: str, filename: str) -> SafetyVerdict:
     """
     Checks the safety of the media using Meta Llama Guard via an OpenAI-compatible Vision API.
-    Returns True if the media is safe/allowed, False if it is unsafe/blocked.
+    Returns SAFE if the media may pass, BLOCKED if policy rejects it, UNAVAILABLE if the
+    classification could not be performed (fail-closed, retryable).
     """
     if not LLAMAGUARD_API_URL:
-        return True # Disabled, pass by default
+        return SafetyVerdict.SAFE # Disabled, pass by default
 
     image_list = []
     if mime_type.startswith("image/"):
@@ -1071,11 +1093,11 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
         image_list = await asyncio.to_thread(extract_video_frames, media_bytes, LLAMAGUARD_VIDEO_FRAMES, LLAMAGUARD_RANDOM_FRAMES)
         if not image_list:
             logging.error(f"[{source_chat}] Could not extract any video frames for safety check. Blocking media due to check failure.")
-            return False
+            return SafetyVerdict.UNAVAILABLE
 
     if not image_list:
         logging.error(f"[{source_chat}] No image bytes available for safety check. Blocking media due to check failure.")
-        return False
+        return SafetyVerdict.UNAVAILABLE
 
     if len(image_list) == 1:
         return await check_single_image_safety(image_list[0], source_chat, filename)
@@ -1095,7 +1117,7 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
     for is_safe, _ in results:
         if is_safe is None:
             logging.error(f"[{source_chat}] One or more video frames failed classification. Blocking video due to fail-closed safety policy.")
-            return False
+            return SafetyVerdict.UNAVAILABLE
 
     # 2. Block-list check (LLAMAGUARD_CHECKS)
     # If ANY frame contains a category in LLAMAGUARD_CHECKS, we block the entire video.
@@ -1105,7 +1127,7 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
                 overlap = [c for c in violated if c in LLAMAGUARD_CHECKS]
                 if overlap:
                     logging.warning(f"[{source_chat}] BLOCKING video {filename}! Frame {i+1} violates configured Llama Guard categories: {overlap}")
-                    return False
+                    return SafetyVerdict.BLOCKED
 
     # 3. Required-list check (LLAMAGUARD_REQUIRE_CHECKS)
     # If whitelisting is active:
@@ -1123,10 +1145,10 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
                     
         if not matched_required:
             logging.warning(f"[{source_chat}] BLOCKING video {filename}! No frames matched any required categories: {LLAMAGUARD_REQUIRE_CHECKS}")
-            return False
+            return SafetyVerdict.BLOCKED
         else:
             logging.info(f"[{source_chat}] Video matches required safety check (found required categories {list(set(all_violated_matched))}). Passing.")
-            return True
+            return SafetyVerdict.SAFE
 
     # 4. Default check if no required-list is configured
     # Under the default policy (or when only LLAMAGUARD_CHECKS is set), a video is allowed if no frames violate the block-list.
@@ -1138,10 +1160,10 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
         for i, (is_safe, violated) in enumerate(results):
             if not is_safe:
                 logging.warning(f"[{source_chat}] BLOCKING video {filename}! Frame {i+1} violates Llama Guard categories: {violated}")
-                return False
+                return SafetyVerdict.BLOCKED
 
     logging.info(f"[{source_chat}] Video {filename} successfully passed safety checks.")
-    return True
+    return SafetyVerdict.SAFE
 
 
 tg_client = TelegramClient(
@@ -1262,14 +1284,16 @@ async def on_matrix_message(room, event: RoomMessageText):
             f"- Images: {'ENABLED' if ENABLE_IMAGES else 'DISABLED'}\n"
             f"- Videos: {'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}\n"
             f"- Oversized Videos: {OVERSIZED_VIDEO_ACTION.upper()} (Limit: {MAX_MEDIA_SIZE_MB}MB, Ceiling: {OVERSIZED_VIDEO_MAX_INPUT_MB}MB)\n"
-            f"- Deduplication: {'ENABLED' if DEDUPLICATION_ENABLED else 'DISABLED'} (TTL: {DEDUPLICATION_TTL_MINUTES}m, Cache: {len(media_deduplicator._cache)}/{DEDUPLICATION_CACHE_SIZE})"
+            f"- Deduplication: {'ENABLED' if DEDUPLICATION_ENABLED else 'DISABLED'} (TTL: {DEDUPLICATION_TTL_MINUTES}m, Cache: {len(media_deduplicator._cache)}/{DEDUPLICATION_CACHE_SIZE})\n"
+            f"- Safety: {'ENABLED' if LLAMAGUARD_API_URL else 'DISABLED'} (Blocked: {SAFETY_STATS['blocked']}, Unavailable: {SAFETY_STATS['unavailable']})"
         )
         status_html = (
             f"<strong>[TgMediaToMatrix] Current Status:</strong><br/>"
             f"• Images: <code>{'ENABLED' if ENABLE_IMAGES else 'DISABLED'}</code><br/>"
             f"• Videos: <code>{'ENABLED' if ENABLE_VIDEOS else 'DISABLED'}</code><br/>"
             f"• Oversized Videos: <code>{OVERSIZED_VIDEO_ACTION.upper()}</code> (Limit: {MAX_MEDIA_SIZE_MB}MB, Ceiling: {OVERSIZED_VIDEO_MAX_INPUT_MB}MB)<br/>"
-            f"• Deduplication: <code>{'ENABLED' if DEDUPLICATION_ENABLED else 'DISABLED'}</code> (TTL: {DEDUPLICATION_TTL_MINUTES}m, Cache: {len(media_deduplicator._cache)}/{DEDUPLICATION_CACHE_SIZE})"
+            f"• Deduplication: <code>{'ENABLED' if DEDUPLICATION_ENABLED else 'DISABLED'}</code> (TTL: {DEDUPLICATION_TTL_MINUTES}m, Cache: {len(media_deduplicator._cache)}/{DEDUPLICATION_CACHE_SIZE})<br/>"
+            f"• Safety: <code>{'ENABLED' if LLAMAGUARD_API_URL else 'DISABLED'}</code> (Blocked: {SAFETY_STATS['blocked']}, Unavailable: {SAFETY_STATS['unavailable']})"
         )
         await send_matrix_notice(room.room_id, status_plain, status_html)
         return
@@ -1503,8 +1527,23 @@ async def process_and_upload_media(message, source_chat, channel_name):
 
     # Llama Guard Safety Check
     if LLAMAGUARD_API_URL:
-        is_safe = await check_media_safety(media_bytes, mime_type, source_chat, filename)
-        if not is_safe:
+        verdict = await check_media_safety(media_bytes, mime_type, source_chat, filename)
+
+        if verdict is SafetyVerdict.UNAVAILABLE:
+            # Fail-closed for this attempt, but this is a technical failure rather than a
+            # policy decision: release the marks so a repost can be classified later.
+            SAFETY_STATS["unavailable"] += 1
+            logging.warning(
+                f"[{source_chat}] Media {filename} not forwarded: safety classification unavailable "
+                f"(fail-closed). Releasing deduplication marks so a repost can be retried."
+            )
+            release_dedup_marks()
+            return
+
+        if verdict is SafetyVerdict.BLOCKED:
+            # Deliberate verdict: the marks stay set so the content is not retried.
+            SAFETY_STATS["blocked"] += 1
+            logging.warning(f"[{source_chat}] Media {filename} blocked by the safety policy. Not forwarded.")
             return
 
     # Thumbnail preparation for videos and images
