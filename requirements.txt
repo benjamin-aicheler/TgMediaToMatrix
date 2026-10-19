@@ -3,3 +3,4 @@ matrix-nio
 av
 Pillow
 blurhash
+imageio-ffmpeg

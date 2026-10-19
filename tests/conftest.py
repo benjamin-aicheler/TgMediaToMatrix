@@ -27,6 +27,7 @@ MUTABLE_GLOBALS = (
     "LLAMAGUARD_CHECKS",
     "LLAMAGUARD_REQUIRE_CHECKS",
     "SHM_WAIT_TIMEOUT_SECONDS",
+    "TOPIC_NAMES_CACHE_SIZE",
     "ENABLE_IMAGES",
     "ENABLE_VIDEOS",
 )
@@ -59,6 +60,7 @@ def bridge_module(tmp_path_factory):
 def bridge(bridge_module, monkeypatch):
     """Per-test state: fresh caches/counters and unpatched configuration afterwards."""
     bridge_module.PROCESSED_ALBUMS.clear()
+    bridge_module.TOPIC_NAMES_CACHE.clear()
     bridge_module.SAFETY_STATS.update({"blocked": 0, "unavailable": 0})
     bridge_module.DELIVERY_STATS.update({"failed": 0, "partial": 0})
     for name in MUTABLE_GLOBALS:

@@ -342,25 +342,31 @@ def is_channel_and_topic_allowed(chat_id, chat_entity, topic_id=None):
 
     return True
 
-# Cache for resolved topic names
-TOPIC_NAMES_CACHE = {}
+# Cache for resolved topic names, bounded like the deduplication cache: a long-running bot
+# must not accumulate one entry per topic it has ever seen.
+TOPIC_NAMES_CACHE_SIZE = 500
+TOPIC_NAMES_CACHE = OrderedDict()
 
 async def get_topic_name(client, chat_entity, topic_id):
     if not topic_id:
         return None
     cache_key = (chat_entity.id, topic_id)
     if cache_key in TOPIC_NAMES_CACHE:
+        TOPIC_NAMES_CACHE.move_to_end(cache_key)
         return TOPIC_NAMES_CACHE[cache_key]
-    
+
     try:
-        from telethon.tl.functions.channels import GetForumTopicsByIDRequest
+        from telethon.tl.functions.messages import GetForumTopicsByIDRequest
         result = await client(GetForumTopicsByIDRequest(
-            channel=chat_entity,
+            peer=chat_entity,
             topics=[topic_id]
         ))
         if result and result.topics:
             name = result.topics[0].title
             TOPIC_NAMES_CACHE[cache_key] = name
+            TOPIC_NAMES_CACHE.move_to_end(cache_key)
+            while len(TOPIC_NAMES_CACHE) > TOPIC_NAMES_CACHE_SIZE:
+                TOPIC_NAMES_CACHE.popitem(last=False)
             return name
     except Exception as e:
         logging.debug(f"Could not fetch topic name for topic {topic_id} in {chat_entity.id}: {e}")
