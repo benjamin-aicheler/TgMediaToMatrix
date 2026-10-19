@@ -5,6 +5,7 @@ covered by hand on the real container instead.
 """
 
 import asyncio
+import logging
 import shutil
 import subprocess
 from types import SimpleNamespace
@@ -486,3 +487,19 @@ def test_probe_against_a_real_video(bridge, tmp_path):
     duration = bridge.probe_video_duration(str(clip), shutil.which("ffmpeg"))
     assert duration == pytest.approx(2.0, abs=0.1)
     assert bridge.probe_video_dimensions(str(clip), shutil.which("ffmpeg")) == (320, 240)
+
+
+# --- Module logger -------------------------------------------------------------------
+
+
+def test_log_records_use_the_module_logger(bridge, caplog):
+    class FailingClient:
+        async def __call__(self, request):
+            raise RuntimeError("API unavailable")
+
+    with caplog.at_level(logging.DEBUG):
+        run(bridge.get_topic_name(FailingClient(), SimpleNamespace(id=100), 5))
+
+    module_records = [r for r in caplog.records if r.name == "tgmabr"]
+    assert module_records, [r.name for r in caplog.records]
+    assert any("Could not fetch topic name" in r.getMessage() for r in module_records)

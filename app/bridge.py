@@ -21,6 +21,10 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
+# Module-level logger: records carry a name instead of landing anonymously on the root
+# logger, so they stay attributable when handlers are added around it.
+logger = logging.getLogger("tgmabr")
+
 STARTUP_TIMESTAMP_MS = int(time.time() * 1000)
 
 # Load and validate environment variables
@@ -48,7 +52,7 @@ try:
         if not MATRIX_ROOM_IDS:
             raise ValueError("MATRIX_ROOM_IDS was provided but contains no valid room IDs.")
         if os.environ.get("MATRIX_ROOM_ID"):
-            logging.info("MATRIX_ROOM_IDS is set; deprecated MATRIX_ROOM_ID environment variable will be ignored.")
+            logger.info("MATRIX_ROOM_IDS is set; deprecated MATRIX_ROOM_ID environment variable will be ignored.")
     else:
         legacy_room_id = os.environ.get("MATRIX_ROOM_ID", "").strip()
         if not legacy_room_id:
@@ -129,7 +133,7 @@ try:
             pass
 
     if OVERSIZED_VIDEO_ACTION in ("split", "compress") and not FFMPEG_PATH:
-        logging.warning("FFmpeg executable was not found on PATH. Oversized video processing will be skipped until ffmpeg is installed.")
+        logger.warning("FFmpeg executable was not found on PATH. Oversized video processing will be skipped until ffmpeg is installed.")
 
     DEDUPLICATION_ENABLED = get_env_bool("DEDUPLICATION_ENABLED", True)
     try:
@@ -230,7 +234,7 @@ try:
         raise ValueError("TG_CHANNELS must contain at least one valid channel identifier.")
 
 except Exception as init_err:
-    logging.critical(f"Configuration initialization failed: {init_err}")
+    logger.critical(f"Configuration initialization failed: {init_err}")
     raise
 
 # Guard against handling the same album twice: album_id -> monotonic timestamp of the first
@@ -369,7 +373,7 @@ async def get_topic_name(client, chat_entity, topic_id):
                 TOPIC_NAMES_CACHE.popitem(last=False)
             return name
     except Exception as e:
-        logging.debug(f"Could not fetch topic name for topic {topic_id} in {chat_entity.id}: {e}")
+        logger.debug(f"Could not fetch topic name for topic {topic_id} in {chat_entity.id}: {e}")
         
     return f"Topic {topic_id}"
 
@@ -386,7 +390,7 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
         if importlib.util.find_spec("PIL") is None:
             raise ImportError("Pillow (PIL) is not installed")
     except ImportError:
-        logging.error("PygAV (av) or Pillow (PIL) package is missing! Please install them to enable video frame safety moderation.")
+        logger.error("PygAV (av) or Pillow (PIL) package is missing! Please install them to enable video frame safety moderation.")
         return []
 
     frames_bytes = []
@@ -455,7 +459,7 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
                 break
 
     except Exception as e:
-        logging.error(f"Failed to extract frames from video: {e}")
+        logger.error(f"Failed to extract frames from video: {e}")
     finally:
         if container is not None:
             try:
@@ -510,12 +514,12 @@ async def reserve_shm_space(required_bytes: int, source_chat: str, filename: str
     """
     space = shm_space()
     if space is None:
-        logging.error(f"[{source_chat}] /dev/shm is not available; skipping {filename} because scratch data must not be written to disk.")
+        logger.error(f"[{source_chat}] /dev/shm is not available; skipping {filename} because scratch data must not be written to disk.")
         return False
 
     total, free = space
     if total < required_bytes:
-        logging.error(
+        logger.error(
             f"[{source_chat}] {filename} needs {required_bytes / (1024 * 1024):.0f} MB of ramdisk, but /dev/shm "
             f"only provides {total / (1024 * 1024):.0f} MB in total. Skipping."
         )
@@ -524,7 +528,7 @@ async def reserve_shm_space(required_bytes: int, source_chat: str, filename: str
     if free >= required_bytes:
         return True
 
-    logging.warning(
+    logger.warning(
         f"[{source_chat}] Waiting up to {SHM_WAIT_TIMEOUT_SECONDS}s for ramdisk space: {filename} needs "
         f"{required_bytes / (1024 * 1024):.0f} MB, {free / (1024 * 1024):.0f} MB free."
     )
@@ -535,10 +539,10 @@ async def reserve_shm_space(required_bytes: int, source_chat: str, filename: str
         if current is None:
             return False
         if current[1] >= required_bytes:
-            logging.info(f"[{source_chat}] Ramdisk space available again for {filename}.")
+            logger.info(f"[{source_chat}] Ramdisk space available again for {filename}.")
             return True
 
-    logging.warning(f"[{source_chat}] Still not enough ramdisk space for {filename} after {SHM_WAIT_TIMEOUT_SECONDS}s. Skipping.")
+    logger.warning(f"[{source_chat}] Still not enough ramdisk space for {filename} after {SHM_WAIT_TIMEOUT_SECONDS}s. Skipping.")
     return False
 
 
@@ -652,7 +656,7 @@ def split_video_lossless(
     t0 = time.time()
     ffmpeg_bin = FFMPEG_PATH or shutil.which("ffmpeg")
     if not ffmpeg_bin:
-        logging.error(f"[{source_chat}] FFmpeg binary not found. Cannot split video.")
+        logger.error(f"[{source_chat}] FFmpeg binary not found. Cannot split video.")
         return []
 
     name_part, ext = os.path.splitext(filename)
@@ -664,7 +668,7 @@ def split_video_lossless(
     parts_count = max(2, math.ceil(total_size / target_part_size))
 
     if not os.path.isdir(SHM_PATH):
-        logging.error(f"[{source_chat}] /dev/shm is not available. Splitting is skipped instead of writing to disk.")
+        logger.error(f"[{source_chat}] /dev/shm is not available. Splitting is skipped instead of writing to disk.")
         return []
 
     with tempfile.TemporaryDirectory(dir=SHM_PATH) as tmp_dir:
@@ -699,7 +703,7 @@ def split_video_lossless(
 
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
         if res.returncode != 0:
-            logging.error(f"[{source_chat}] FFmpeg split error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
+            logger.error(f"[{source_chat}] FFmpeg split error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
             return []
 
         part_files = sorted([
@@ -720,19 +724,19 @@ def split_video_lossless(
             cmd[cmd.index("-segment_time") + 1] = str(segment_time)
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             if res.returncode != 0:
-                logging.error(f"[{source_chat}] FFmpeg split retry error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
+                logger.error(f"[{source_chat}] FFmpeg split retry error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
             part_files = sorted([
                 os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
                 if f.startswith("part_") and f.endswith(ext)
             ])
 
         if len(part_files) <= 1:
-            logging.warning(f"[{source_chat}] Video could not be split losslessly (no internal keyframes found).")
+            logger.warning(f"[{source_chat}] Video could not be split losslessly (no internal keyframes found).")
             return []
 
         oversized_parts = [f for f in part_files if os.path.getsize(f) > max_bytes]
         if oversized_parts:
-            logging.warning(
+            logger.warning(
                 f"[{source_chat}] Splitting produced {len(part_files)} parts, but {len(oversized_parts)} part(s) "
                 f"still exceed {max_bytes / (1024 * 1024):.1f} MB due to keyframe spacing."
             )
@@ -757,7 +761,7 @@ def split_video_lossless(
                 "size": len(p_bytes)
             })
 
-        logging.info(
+        logger.info(
             f"[{source_chat}] Video ({total_size / (1024 * 1024):.2f} MB) losslessly split into "
             f"{total_parts} parts in {time.time() - t0:.2f}s."
         )
@@ -781,14 +785,14 @@ def compress_video(
     t0 = time.time()
     ffmpeg_bin = FFMPEG_PATH or shutil.which("ffmpeg")
     if not ffmpeg_bin:
-        logging.error(f"[{source_chat}] FFmpeg binary not found. Cannot compress video.")
+        logger.error(f"[{source_chat}] FFmpeg binary not found. Cannot compress video.")
         return None
 
     name_part, ext = os.path.splitext(filename)
     out_ext = ".mp4"
 
     if not os.path.isdir(SHM_PATH):
-        logging.error(f"[{source_chat}] /dev/shm is not available. Compression is skipped instead of writing to disk.")
+        logger.error(f"[{source_chat}] /dev/shm is not available. Compression is skipped instead of writing to disk.")
         return None
 
     with tempfile.TemporaryDirectory(dir=SHM_PATH) as tmp_dir:
@@ -822,7 +826,7 @@ def compress_video(
             cmd[audio_arg:audio_arg + 2] = ["-c:a", "aac", "-b:a", "128k"]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             if res.returncode != 0:
-                logging.error(f"[{source_chat}] FFmpeg compression failed: {res.stderr.decode('utf-8', errors='replace')[:400]}")
+                logger.error(f"[{source_chat}] FFmpeg compression failed: {res.stderr.decode('utf-8', errors='replace')[:400]}")
                 return None
 
         if os.path.exists(output_path):
@@ -832,7 +836,7 @@ def compress_video(
             dur = probe_video_duration(output_path, ffmpeg_bin)
             dims = probe_video_dimensions(output_path, ffmpeg_bin)
 
-            logging.info(
+            logger.info(
                 f"[{source_chat}] Video compressed from {len(video_bytes)/(1024*1024):.2f} MB "
                 f"to {len(out_bytes)/(1024*1024):.2f} MB ({(1 - len(out_bytes)/len(video_bytes))*100:.1f}% reduction) in {time.time() - t0:.2f}s."
             )
@@ -870,13 +874,13 @@ def probe_image(image_bytes: bytes) -> tuple[int, int, str] | None:
     try:
         from PIL import Image
     except ImportError:
-        logging.error("Pillow (PIL) package is missing! Please install it to enable thumbnail dimension probing.")
+        logger.error("Pillow (PIL) package is missing! Please install it to enable thumbnail dimension probing.")
         return None
 
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
             if img.format not in STILL_IMAGE_FORMATS:
-                logging.debug(f"Ignoring thumbnail of unexpected format {img.format}.")
+                logger.debug(f"Ignoring thumbnail of unexpected format {img.format}.")
                 return None
             width, height = img.size
             Image.init()
@@ -885,7 +889,7 @@ def probe_image(image_bytes: bytes) -> tuple[int, int, str] | None:
                 return None
             return int(width), int(height), mime
     except Exception as e:
-        logging.debug(f"Could not probe thumbnail bytes: {e}")
+        logger.debug(f"Could not probe thumbnail bytes: {e}")
         return None
 
 
@@ -897,13 +901,13 @@ def generate_image_thumbnail(image_bytes: bytes, max_size: int = 800) -> tuple[b
     try:
         from PIL import Image
     except ImportError:
-        logging.error("Pillow (PIL) package is missing! Cannot generate image thumbnail.")
+        logger.error("Pillow (PIL) package is missing! Cannot generate image thumbnail.")
         return None
 
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
             if img.format not in STILL_IMAGE_FORMATS:
-                logging.debug(f"Refusing to generate thumbnail for unexpected format {img.format}.")
+                logger.debug(f"Refusing to generate thumbnail for unexpected format {img.format}.")
                 return None
 
             # Get MIME format type
@@ -936,7 +940,7 @@ def generate_image_thumbnail(image_bytes: bytes, max_size: int = 800) -> tuple[b
             img.save(out, format=save_format, quality=85, optimize=True)
             return out.getvalue(), width, height, mime
     except Exception as e:
-        logging.debug(f"Could not generate image thumbnail: {e}")
+        logger.debug(f"Could not generate image thumbnail: {e}")
         return None
 
 
@@ -951,13 +955,13 @@ def compute_blurhash(image_bytes: bytes) -> str | None:
         from PIL import Image
         import blurhash
     except ImportError:
-        logging.debug("Pillow (PIL) or blurhash package is missing; sending media without a blurhash.")
+        logger.debug("Pillow (PIL) or blurhash package is missing; sending media without a blurhash.")
         return None
 
     try:
         with Image.open(io.BytesIO(image_bytes)) as img:
             if img.format not in STILL_IMAGE_FORMATS:
-                logging.debug(f"Refusing to blurhash unexpected format {img.format}.")
+                logger.debug(f"Refusing to blurhash unexpected format {img.format}.")
                 return None
             # Decode into an RGB copy while the source is still open, so the copy
             # outlives the context manager that closes the source.
@@ -975,7 +979,7 @@ def compute_blurhash(image_bytes: bytes) -> str | None:
         ]
         return blurhash.encode(rows, BLURHASH_COMPONENTS_X, BLURHASH_COMPONENTS_Y)
     except Exception as e:
-        logging.debug(f"Could not compute blurhash: {e}")
+        logger.debug(f"Could not compute blurhash: {e}")
         return None
 
 
@@ -1009,7 +1013,7 @@ async def get_image_safety_classification(image_bytes: bytes, source_chat: str, 
     - violated_categories is a list of violated Sxx categories.
     """
     label_prefix = f" [{index_label}]" if index_label else ""
-    logging.info(f"[{source_chat}]{label_prefix} Calling Llama Guard API ({LLAMAGUARD_MODEL_NAME}) for safety classification of {filename}...")
+    logger.info(f"[{source_chat}]{label_prefix} Calling Llama Guard API ({LLAMAGUARD_MODEL_NAME}) for safety classification of {filename}...")
     
     try:
         import base64
@@ -1096,15 +1100,15 @@ Provide your safety assessment for ONLY THE LAST User in the above conversation:
         resp_json = json.loads(response_bytes.decode('utf-8'))
         
         if "choices" not in resp_json or not resp_json["choices"]:
-            logging.error(f"[{source_chat}]{label_prefix} Unexpected Llama Guard API response structure: {resp_json}")
+            logger.error(f"[{source_chat}]{label_prefix} Unexpected Llama Guard API response structure: {resp_json}")
             return None, []
             
         response_text = resp_json["choices"][0]["message"]["content"].strip()
-        logging.info(f"[{source_chat}]{label_prefix} Llama Guard classification result: {response_text}")
+        logger.info(f"[{source_chat}]{label_prefix} Llama Guard classification result: {response_text}")
         
         lines = response_text.split()
         if not lines:
-            logging.error(f"[{source_chat}]{label_prefix} Llama Guard returned empty response.")
+            logger.error(f"[{source_chat}]{label_prefix} Llama Guard returned empty response.")
             return None, []
             
         status = lines[0].lower()
@@ -1122,11 +1126,11 @@ Provide your safety assessment for ONLY THE LAST User in the above conversation:
         elif status == "safe":
             return True, []
         else:
-            logging.error(f"[{source_chat}]{label_prefix} Llama Guard returned unexpected status '{status}'.")
+            logger.error(f"[{source_chat}]{label_prefix} Llama Guard returned unexpected status '{status}'.")
             return None, []
             
     except Exception as e:
-        logging.error(f"[{source_chat}]{label_prefix} Error during Llama Guard safety check: {e}")
+        logger.error(f"[{source_chat}]{label_prefix} Error during Llama Guard safety check: {e}")
         return None, []
 
 
@@ -1147,30 +1151,30 @@ async def check_single_image_safety(image_bytes: bytes, source_chat: str, filena
         if LLAMAGUARD_CHECKS:
             overlap = [c for c in violated if c in LLAMAGUARD_CHECKS]
             if overlap:
-                logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates configured Llama Guard categories: {overlap}")
+                logger.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates configured Llama Guard categories: {overlap}")
                 return SafetyVerdict.BLOCKED
 
         # 2. Required-list check (LLAMAGUARD_REQUIRE_CHECKS)
         if LLAMAGUARD_REQUIRE_CHECKS:
             required_overlap = [c for c in violated if c in LLAMAGUARD_REQUIRE_CHECKS]
             if not required_overlap:
-                logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as unsafe ({violated}), but does not match any required categories: {LLAMAGUARD_REQUIRE_CHECKS}")
+                logger.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as unsafe ({violated}), but does not match any required categories: {LLAMAGUARD_REQUIRE_CHECKS}")
                 return SafetyVerdict.BLOCKED
             else:
-                logging.info(f"[{source_chat}]{label_prefix} Media matches required safety check: {required_overlap}. Passing.")
+                logger.info(f"[{source_chat}]{label_prefix} Media matches required safety check: {required_overlap}. Passing.")
                 return SafetyVerdict.SAFE
 
         # 3. Default behavior if no required-list and no block-list overlap
         if LLAMAGUARD_CHECKS:
-            logging.info(f"[{source_chat}]{label_prefix} Media classified as unsafe ({violated}), but none are in configured important checks ({LLAMAGUARD_CHECKS}). Passing.")
+            logger.info(f"[{source_chat}]{label_prefix} Media classified as unsafe ({violated}), but none are in configured important checks ({LLAMAGUARD_CHECKS}). Passing.")
             return SafetyVerdict.SAFE
         else:
-            logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates Llama Guard categories: {violated}")
+            logger.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Violates Llama Guard categories: {violated}")
             return SafetyVerdict.BLOCKED
             
     else:  # safe
         if LLAMAGUARD_REQUIRE_CHECKS:
-            logging.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as safe, but does not match any required unsafe categories: {LLAMAGUARD_REQUIRE_CHECKS}")
+            logger.warning(f"[{source_chat}]{label_prefix} BLOCKING media {filename}! Classified as safe, but does not match any required unsafe categories: {LLAMAGUARD_REQUIRE_CHECKS}")
             return SafetyVerdict.BLOCKED
         return SafetyVerdict.SAFE
 
@@ -1188,14 +1192,14 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
     if mime_type.startswith("image/"):
         image_list = [media_bytes]
     elif mime_type.startswith("video/"):
-        logging.info(f"[{source_chat}] Extracting up to {LLAMAGUARD_VIDEO_FRAMES} frames from video {filename} for Llama Guard safety check...")
+        logger.info(f"[{source_chat}] Extracting up to {LLAMAGUARD_VIDEO_FRAMES} frames from video {filename} for Llama Guard safety check...")
         image_list = await asyncio.to_thread(extract_video_frames, media_bytes, LLAMAGUARD_VIDEO_FRAMES, LLAMAGUARD_RANDOM_FRAMES)
         if not image_list:
-            logging.error(f"[{source_chat}] Could not extract any video frames for safety check. Blocking media due to check failure.")
+            logger.error(f"[{source_chat}] Could not extract any video frames for safety check. Blocking media due to check failure.")
             return SafetyVerdict.UNAVAILABLE
 
     if not image_list:
-        logging.error(f"[{source_chat}] No image bytes available for safety check. Blocking media due to check failure.")
+        logger.error(f"[{source_chat}] No image bytes available for safety check. Blocking media due to check failure.")
         return SafetyVerdict.UNAVAILABLE
 
     if len(image_list) == 1:
@@ -1217,7 +1221,7 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
     # 1. Check for any API/processing errors (fail-closed)
     for is_safe, _ in results:
         if is_safe is None:
-            logging.error(f"[{source_chat}] One or more video frames failed classification. Blocking video due to fail-closed safety policy.")
+            logger.error(f"[{source_chat}] One or more video frames failed classification. Blocking video due to fail-closed safety policy.")
             return SafetyVerdict.UNAVAILABLE
 
     # 2. Block-list check (LLAMAGUARD_CHECKS)
@@ -1227,7 +1231,7 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
             if not is_safe:
                 overlap = [c for c in violated if c in LLAMAGUARD_CHECKS]
                 if overlap:
-                    logging.warning(f"[{source_chat}] BLOCKING video {filename}! Frame {i+1} violates configured Llama Guard categories: {overlap}")
+                    logger.warning(f"[{source_chat}] BLOCKING video {filename}! Frame {i+1} violates configured Llama Guard categories: {overlap}")
                     return SafetyVerdict.BLOCKED
 
     # 3. Required-list check (LLAMAGUARD_REQUIRE_CHECKS)
@@ -1245,10 +1249,10 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
                     all_violated_matched.extend(required_overlap)
                     
         if not matched_required:
-            logging.warning(f"[{source_chat}] BLOCKING video {filename}! No frames matched any required categories: {LLAMAGUARD_REQUIRE_CHECKS}")
+            logger.warning(f"[{source_chat}] BLOCKING video {filename}! No frames matched any required categories: {LLAMAGUARD_REQUIRE_CHECKS}")
             return SafetyVerdict.BLOCKED
         else:
-            logging.info(f"[{source_chat}] Video matches required safety check (found required categories {list(set(all_violated_matched))}). Passing.")
+            logger.info(f"[{source_chat}] Video matches required safety check (found required categories {list(set(all_violated_matched))}). Passing.")
             return SafetyVerdict.SAFE
 
     # 4. Default check if no required-list is configured
@@ -1260,10 +1264,10 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
         # This is the "block all unsafe content" mode. Any unsafe frame blocks the video.
         for i, (is_safe, violated) in enumerate(results):
             if not is_safe:
-                logging.warning(f"[{source_chat}] BLOCKING video {filename}! Frame {i+1} violates Llama Guard categories: {violated}")
+                logger.warning(f"[{source_chat}] BLOCKING video {filename}! Frame {i+1} violates Llama Guard categories: {violated}")
                 return SafetyVerdict.BLOCKED
 
-    logging.info(f"[{source_chat}] Video {filename} successfully passed safety checks.")
+    logger.info(f"[{source_chat}] Video {filename} successfully passed safety checks.")
     return SafetyVerdict.SAFE
 
 
@@ -1296,7 +1300,7 @@ async def send_matrix_notice(room_id: str, plain_text: str, html_text: str):
             content=content
         )
     except Exception as e:
-        logging.error(f"Failed to send Matrix command response notice: {e}")
+        logger.error(f"Failed to send Matrix command response notice: {e}")
 
 
 async def on_matrix_message(room, event: RoomMessageText):
@@ -1323,10 +1327,10 @@ async def on_matrix_message(room, event: RoomMessageText):
 
     # Check authorization to issue commands
     if not is_stop_allowed:
-        logging.warning(f"[{room.room_id}] Unauthorized command attempt by invalid sender '{event.sender}': '{body}'")
+        logger.warning(f"[{room.room_id}] Unauthorized command attempt by invalid sender '{event.sender}': '{body}'")
         return
 
-    logging.info(f"[{room.room_id}] Command received from user '{event.sender}': '{body}'")
+    logger.info(f"[{room.room_id}] Command received from user '{event.sender}': '{body}'")
 
     parts = body.split()
     if len(parts) == 1 or parts[1].lower() in ("help", "-h", "--help"):
@@ -1354,7 +1358,7 @@ async def on_matrix_message(room, event: RoomMessageText):
     # START / ENABLE (Both) -> Requires Admin
     if subcmd in ("start", "enable") and len(parts) == 2:
         if not is_admin:
-            logging.warning(f"[{room.room_id}] Unauthorized start attempt by non-admin '{event.sender}': '{body}'")
+            logger.warning(f"[{room.room_id}] Unauthorized start attempt by non-admin '{event.sender}': '{body}'")
             notice_plain = "[TgMediaToMatrix] Only the configured admin user can start/enable media bridging."
             notice_html = "<strong>[TgMediaToMatrix]</strong> Only the configured admin user can start/enable media bridging."
             await send_matrix_notice(room.room_id, notice_plain, notice_html)
@@ -1362,7 +1366,7 @@ async def on_matrix_message(room, event: RoomMessageText):
 
         ENABLE_IMAGES = True
         ENABLE_VIDEOS = True
-        logging.info(f"[{room.room_id}] User '{event.sender}' STARTED (ENABLED) both image and video bridging.")
+        logger.info(f"[{room.room_id}] User '{event.sender}' STARTED (ENABLED) both image and video bridging.")
         msg_plain = "[TgMediaToMatrix] Both image and video bridging have been STARTED (ENABLED)."
         msg_html = "<strong>[TgMediaToMatrix]</strong> Both image and video bridging have been <code>STARTED</code> (ENABLED)."
         await send_matrix_notice(room.room_id, msg_plain, msg_html)
@@ -1372,7 +1376,7 @@ async def on_matrix_message(room, event: RoomMessageText):
     if subcmd in ("stop", "disable") and len(parts) == 2:
         ENABLE_IMAGES = False
         ENABLE_VIDEOS = False
-        logging.info(f"[{room.room_id}] User '{event.sender}' STOPPED (DISABLED) both image and video bridging.")
+        logger.info(f"[{room.room_id}] User '{event.sender}' STOPPED (DISABLED) both image and video bridging.")
         msg_plain = "[TgMediaToMatrix] Both image and video bridging have been STOPPED (DISABLED)."
         msg_html = "<strong>[TgMediaToMatrix]</strong> Both image and video bridging have been <code>STOPPED</code> (DISABLED)."
         await send_matrix_notice(room.room_id, msg_plain, msg_html)
@@ -1406,20 +1410,20 @@ async def on_matrix_message(room, event: RoomMessageText):
         action = parts[2].lower()
         if action in ("enable", "on", "true", "1"):
             if not is_admin:
-                logging.warning(f"[{room.room_id}] Unauthorized image enable attempt by non-admin '{event.sender}': '{body}'")
+                logger.warning(f"[{room.room_id}] Unauthorized image enable attempt by non-admin '{event.sender}': '{body}'")
                 notice_plain = "[TgMediaToMatrix] Only the configured admin user can enable image bridging."
                 notice_html = "<strong>[TgMediaToMatrix]</strong> Only the configured admin user can enable image bridging."
                 await send_matrix_notice(room.room_id, notice_plain, notice_html)
                 return
 
             ENABLE_IMAGES = True
-            logging.info(f"[{room.room_id}] User '{event.sender}' ENABLED image bridging.")
+            logger.info(f"[{room.room_id}] User '{event.sender}' ENABLED image bridging.")
             msg_plain = "[TgMediaToMatrix] Image bridging has been ENABLED."
             msg_html = "<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>ENABLED</code>."
             await send_matrix_notice(room.room_id, msg_plain, msg_html)
         elif action in ("disable", "off", "false", "0"):
             ENABLE_IMAGES = False
-            logging.info(f"[{room.room_id}] User '{event.sender}' DISABLED image bridging.")
+            logger.info(f"[{room.room_id}] User '{event.sender}' DISABLED image bridging.")
             msg_plain = "[TgMediaToMatrix] Image bridging has been DISABLED."
             msg_html = "<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>DISABLED</code>."
             await send_matrix_notice(room.room_id, msg_plain, msg_html)
@@ -1434,20 +1438,20 @@ async def on_matrix_message(room, event: RoomMessageText):
         action = parts[2].lower()
         if action in ("enable", "on", "true", "1"):
             if not is_admin:
-                logging.warning(f"[{room.room_id}] Unauthorized video enable attempt by non-admin '{event.sender}': '{body}'")
+                logger.warning(f"[{room.room_id}] Unauthorized video enable attempt by non-admin '{event.sender}': '{body}'")
                 notice_plain = "[TgMediaToMatrix] Only the configured admin user can enable video bridging."
                 notice_html = "<strong>[TgMediaToMatrix]</strong> Only the configured admin user can enable video bridging."
                 await send_matrix_notice(room.room_id, notice_plain, notice_html)
                 return
 
             ENABLE_VIDEOS = True
-            logging.info(f"[{room.room_id}] User '{event.sender}' ENABLED video bridging.")
+            logger.info(f"[{room.room_id}] User '{event.sender}' ENABLED video bridging.")
             msg_plain = "[TgMediaToMatrix] Video bridging has been ENABLED."
             msg_html = "<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>ENABLED</code>."
             await send_matrix_notice(room.room_id, msg_plain, msg_html)
         elif action in ("disable", "off", "false", "0"):
             ENABLE_VIDEOS = False
-            logging.info(f"[{room.room_id}] User '{event.sender}' DISABLED video bridging.")
+            logger.info(f"[{room.room_id}] User '{event.sender}' DISABLED video bridging.")
             msg_plain = "[TgMediaToMatrix] Video bridging has been DISABLED."
             msg_html = "<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>DISABLED</code>."
             await send_matrix_notice(room.room_id, msg_plain, msg_html)
@@ -1474,7 +1478,7 @@ async def send_matrix_media_event(
     blurhash_str: str = None
 ) -> bool:
     """Uploads in-memory media bytes to Matrix homeserver and dispatches room messages across MATRIX_ROOM_IDS."""
-    logging.info(f"[{source_chat}] Uploading to Matrix homeserver: {filename} ({len(media_bytes)} bytes)...")
+    logger.info(f"[{source_chat}] Uploading to Matrix homeserver: {filename} ({len(media_bytes)} bytes)...")
     try:
         upload_resp, _ = await matrix_client.upload(
             io.BytesIO(media_bytes),
@@ -1483,11 +1487,11 @@ async def send_matrix_media_event(
             filesize=len(media_bytes)
         )
         if not isinstance(upload_resp, UploadResponse):
-            logging.error(f"[{source_chat}] Matrix server rejected upload for {filename}! Response: {upload_resp}")
+            logger.error(f"[{source_chat}] Matrix server rejected upload for {filename}! Response: {upload_resp}")
             return False
 
         content_uri = upload_resp.content_uri
-        logging.info(f"[{source_chat}] Upload successful! MXC-URI: {content_uri}. Sending room message...")
+        logger.info(f"[{source_chat}] Upload successful! MXC-URI: {content_uri}. Sending room message...")
 
         size_bytes = len(media_bytes)
         if size_bytes < 1024:
@@ -1533,21 +1537,21 @@ async def send_matrix_media_event(
                 )
                 if isinstance(send_response, RoomSendResponse):
                     delivered_rooms.append(target_room_id)
-                    logging.info(f"[{source_chat}] Event successfully posted in Matrix room '{target_room_id}' (Event ID: {send_response.event_id})")
+                    logger.info(f"[{source_chat}] Event successfully posted in Matrix room '{target_room_id}' (Event ID: {send_response.event_id})")
                 elif isinstance(send_response, RoomSendError):
                     failed_rooms.append(target_room_id)
-                    logging.error(f"[{source_chat}] Failed to post event to Matrix room '{target_room_id}': {send_response.message} (status code: {send_response.status_code})")
+                    logger.error(f"[{source_chat}] Failed to post event to Matrix room '{target_room_id}': {send_response.message} (status code: {send_response.status_code})")
                 else:
                     failed_rooms.append(target_room_id)
-                    logging.error(f"[{source_chat}] Unknown response type when posting event to Matrix room '{target_room_id}': {send_response}")
+                    logger.error(f"[{source_chat}] Unknown response type when posting event to Matrix room '{target_room_id}': {send_response}")
             except Exception as room_err:
                 failed_rooms.append(target_room_id)
-                logging.error(f"[{source_chat}] Error sending event to Matrix room '{target_room_id}': {room_err}")
+                logger.error(f"[{source_chat}] Error sending event to Matrix room '{target_room_id}': {room_err}")
 
         # Report the real outcome: the caller uses this to decide whether a repost may be retried.
         if not delivered_rooms:
             DELIVERY_STATS["failed"] += 1
-            logging.error(
+            logger.error(
                 f"[{source_chat}] {filename} reached none of the {len(MATRIX_ROOM_IDS)} configured room(s) "
                 f"({', '.join(failed_rooms) if failed_rooms else 'no rooms configured'}). "
                 f"Reporting failure so the caller can release the deduplication marks."
@@ -1556,13 +1560,13 @@ async def send_matrix_media_event(
 
         if failed_rooms:
             DELIVERY_STATS["partial"] += 1
-            logging.warning(
+            logger.warning(
                 f"[{source_chat}] {filename} reached {len(delivered_rooms)}/{len(MATRIX_ROOM_IDS)} rooms; "
                 f"failed: {', '.join(failed_rooms)}."
             )
         return True
     except Exception as e:
-        logging.error(f"[{source_chat}] General error during Matrix transfer of {filename}: {e}")
+        logger.error(f"[{source_chat}] General error during Matrix transfer of {filename}: {e}")
         return False
 
 
@@ -1584,11 +1588,11 @@ async def process_and_upload_media(message, source_chat, channel_name):
         return
 
     if is_image and not ENABLE_IMAGES:
-        logging.info(f"[{source_chat}] Skipping image media because ENABLE_IMAGES is false.")
+        logger.info(f"[{source_chat}] Skipping image media because ENABLE_IMAGES is false.")
         return
 
     if is_video and not ENABLE_VIDEOS:
-        logging.info(f"[{source_chat}] Skipping video media because ENABLE_VIDEOS is false.")
+        logger.info(f"[{source_chat}] Skipping video media because ENABLE_VIDEOS is false.")
         return
 
     if not filename:
@@ -1599,44 +1603,44 @@ async def process_and_upload_media(message, source_chat, channel_name):
     # letting the later ">" comparison raise TypeError.
     file_size = (message.file.size if message.file else 0) or 0
     if is_image and MIN_IMAGE_SIZE_BYTES > 0 and file_size < MIN_IMAGE_SIZE_BYTES:
-        logging.info(f"[{source_chat}] Skipping image {filename}: File size ({round(file_size / 1024, 2)} KB) is below minimum required size of {MIN_IMAGE_SIZE_KB} KB.")
+        logger.info(f"[{source_chat}] Skipping image {filename}: File size ({round(file_size / 1024, 2)} KB) is below minimum required size of {MIN_IMAGE_SIZE_KB} KB.")
         return
 
     if is_video and MIN_VIDEO_SIZE_BYTES > 0 and file_size < MIN_VIDEO_SIZE_BYTES:
-        logging.info(f"[{source_chat}] Skipping video {filename}: File size ({round(file_size / 1024, 2)} KB) is below minimum required size of {MIN_VIDEO_SIZE_KB} KB.")
+        logger.info(f"[{source_chat}] Skipping video {filename}: File size ({round(file_size / 1024, 2)} KB) is below minimum required size of {MIN_VIDEO_SIZE_KB} KB.")
         return
 
     # Pre-download deduplication check (Telegram Media ID)
     tg_media_id = get_telegram_media_id(message)
     if tg_media_id and media_deduplicator.is_duplicate(tg_media_id):
-        logging.info(f"[{source_chat}] Skipping duplicate media {filename}: Telegram media ID ({tg_media_id}) was already forwarded within {DEDUPLICATION_TTL_MINUTES}m.")
+        logger.info(f"[{source_chat}] Skipping duplicate media {filename}: Telegram media ID ({tg_media_id}) was already forwarded within {DEDUPLICATION_TTL_MINUTES}m.")
         return
 
     if tg_media_id:
         media_deduplicator.mark_seen(tg_media_id)
 
-    logging.info(f"[{source_chat}] Processing media: {filename} ({mime_type}). Starting Telegram download...")
+    logger.info(f"[{source_chat}] Processing media: {filename} ({mime_type}). Starting Telegram download...")
     
     try:
         media_bytes = await message.download_media(file=bytes)
         if not media_bytes:
-            logging.error(f"[{source_chat}] Telegram download failed for: {filename}")
+            logger.error(f"[{source_chat}] Telegram download failed for: {filename}")
             if tg_media_id:
                 media_deduplicator.unmark(tg_media_id)
             return
     except Exception as e:
-        logging.error(f"[{source_chat}] Critical error during Telegram download: {e}")
+        logger.error(f"[{source_chat}] Critical error during Telegram download: {e}")
         if tg_media_id:
             media_deduplicator.unmark(tg_media_id)
         return
 
-    logging.info(f"[{source_chat}] Download complete ({len(media_bytes)} bytes).")
+    logger.info(f"[{source_chat}] Download complete ({len(media_bytes)} bytes).")
 
     # Post-download deduplication check (Content SHA-256)
     content_hash = await asyncio.to_thread(compute_sha256, media_bytes)
     content_key = f"sha256_{content_hash}"
     if media_deduplicator.is_duplicate(content_key):
-        logging.info(f"[{source_chat}] Skipping duplicate media {filename}: Content hash ({content_hash[:12]}...) was already forwarded within {DEDUPLICATION_TTL_MINUTES}m.")
+        logger.info(f"[{source_chat}] Skipping duplicate media {filename}: Content hash ({content_hash[:12]}...) was already forwarded within {DEDUPLICATION_TTL_MINUTES}m.")
         return
     media_deduplicator.mark_seen(content_key)
 
@@ -1659,7 +1663,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
             # Fail-closed for this attempt, but this is a technical failure rather than a
             # policy decision: release the marks so a repost can be classified later.
             SAFETY_STATS["unavailable"] += 1
-            logging.warning(
+            logger.warning(
                 f"[{source_chat}] Media {filename} not forwarded: safety classification unavailable "
                 f"(fail-closed). Releasing deduplication marks so a repost can be retried."
             )
@@ -1669,7 +1673,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
         if verdict is SafetyVerdict.BLOCKED:
             # Deliberate verdict: the marks stay set so the content is not retried.
             SAFETY_STATS["blocked"] += 1
-            logging.warning(f"[{source_chat}] Media {filename} blocked by the safety policy. Not forwarded.")
+            logger.warning(f"[{source_chat}] Media {filename} blocked by the safety policy. Not forwarded.")
             return
 
     # Thumbnail preparation for videos and images
@@ -1717,7 +1721,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
                         "h": thumb_h
                     }
         except Exception as thumb_err:
-            logging.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
+            logger.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
     if blurhash_bytes is None and is_image:
         blurhash_bytes = media_bytes
@@ -1745,7 +1749,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
 
     # Handle oversized videos (if above configured limit)
     if is_video and len(media_bytes) > MAX_MEDIA_SIZE_BYTES:
-        logging.info(
+        logger.info(
             f"[{source_chat}] Oversized video ({round(len(media_bytes) / (1024 * 1024), 2)} MB > "
             f"{MAX_MEDIA_SIZE_MB} MB). Action: {OVERSIZED_VIDEO_ACTION}..."
         )
@@ -1805,7 +1809,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
                     if not sent:
                         upload_failed = True
                 if upload_failed:
-                    logging.warning(
+                    logger.warning(
                         f"[{source_chat}] At least one split part failed to reach Matrix; "
                         f"releasing deduplication marks so a repost can be retried."
                     )
@@ -1813,7 +1817,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
                 return
 
             if OVERSIZED_VIDEO_FALLBACK_COMPRESS:
-                logging.info(f"[{source_chat}] Lossless split produced no parts; falling back to compression...")
+                logger.info(f"[{source_chat}] Lossless split produced no parts; falling back to compression...")
                 compressed = await asyncio.to_thread(
                     compress_video,
                     media_bytes,
@@ -1835,11 +1839,11 @@ async def process_and_upload_media(message, source_chat, channel_name):
                         orig_w = compressed["w"]
                         orig_h = compressed["h"]
                 else:
-                    logging.warning(f"[{source_chat}] Video compression fallback failed or result still exceeds {MAX_MEDIA_SIZE_MB} MB. Skipping.")
+                    logger.warning(f"[{source_chat}] Video compression fallback failed or result still exceeds {MAX_MEDIA_SIZE_MB} MB. Skipping.")
                     release_dedup_marks()
                     return
             else:
-                logging.warning(f"[{source_chat}] Video could not be split below {MAX_MEDIA_SIZE_MB} MB. Skipping.")
+                logger.warning(f"[{source_chat}] Video could not be split below {MAX_MEDIA_SIZE_MB} MB. Skipping.")
                 release_dedup_marks()
                 return
 
@@ -1865,12 +1869,12 @@ async def process_and_upload_media(message, source_chat, channel_name):
                     orig_w = compressed["w"]
                     orig_h = compressed["h"]
             else:
-                logging.warning(f"[{source_chat}] Video compression failed or result still exceeds {MAX_MEDIA_SIZE_MB} MB. Skipping.")
+                logger.warning(f"[{source_chat}] Video compression failed or result still exceeds {MAX_MEDIA_SIZE_MB} MB. Skipping.")
                 release_dedup_marks()
                 return
 
         elif OVERSIZED_VIDEO_ACTION == "skip":
-            logging.warning(f"[{source_chat}] Media skipped: Video ({round(len(media_bytes) / (1024 * 1024), 2)} MB) exceeds limit of {MAX_MEDIA_SIZE_MB} MB.")
+            logger.warning(f"[{source_chat}] Media skipped: Video ({round(len(media_bytes) / (1024 * 1024), 2)} MB) exceeds limit of {MAX_MEDIA_SIZE_MB} MB.")
             return
 
     # Standard upload for single media item
@@ -1899,7 +1903,7 @@ async def process_and_upload_media(message, source_chat, channel_name):
         blurhash_str=blurhash_str
     )
     if not sent:
-        logging.warning(
+        logger.warning(
             f"[{source_chat}] Media {filename} could not be delivered to Matrix; "
             f"releasing deduplication marks so a repost can be retried."
         )
@@ -1945,17 +1949,17 @@ async def master_handler(event):
     if file_size > MAX_MEDIA_SIZE_BYTES:
         if msg_is_video and OVERSIZED_VIDEO_ACTION in ("split", "compress"):
             if file_size > OVERSIZED_VIDEO_MAX_INPUT_BYTES:
-                logging.warning(
+                logger.warning(
                     f"[{chat_identifier}] Video skipped: File with {round(file_size / (1024 * 1024), 2)} MB "
                     f"exceeds maximum allowed size for processing ({OVERSIZED_VIDEO_MAX_INPUT_MB} MB)."
                 )
                 return
-            logging.info(
+            logger.info(
                 f"[{chat_identifier}] Oversized video detected ({round(file_size / (1024 * 1024), 2)} MB > "
                 f"{MAX_MEDIA_SIZE_MB} MB). Will {OVERSIZED_VIDEO_ACTION} after download."
             )
         else:
-            logging.warning(f"[{chat_identifier}] Media skipped: File with {round(file_size / (1024 * 1024), 2)} MB exceeds limit of {MAX_MEDIA_SIZE_MB} MB.")
+            logger.warning(f"[{chat_identifier}] Media skipped: File with {round(file_size / (1024 * 1024), 2)} MB exceeds limit of {MAX_MEDIA_SIZE_MB} MB.")
             return
 
     if event.message.grouped_id is not None:
@@ -1965,7 +1969,7 @@ async def master_handler(event):
             return
 
         PROCESSED_ALBUMS[album_id] = time.monotonic()
-        logging.info(f"[{chat_identifier}] New album detected (Grouped ID: {album_id}). Waiting for complete reception...")
+        logger.info(f"[{chat_identifier}] New album detected (Grouped ID: {album_id}). Waiting for complete reception...")
 
         # Short grace period so Telegram can deliver the remaining album items. The guard
         # entry is deliberately not released afterwards: it expires via ALBUM_GUARD_TTL_SECONDS,
@@ -1982,7 +1986,7 @@ async def master_handler(event):
             )
             filtered_messages = [m for m in album_messages if m.grouped_id == album_id]
 
-            logging.info(f"[{chat_identifier}] Processing {len(filtered_messages)} items from album {album_id}...")
+            logger.info(f"[{chat_identifier}] Processing {len(filtered_messages)} items from album {album_id}...")
             for msg in reversed(filtered_messages):
                 if msg.media:
                     exact_size = (msg.file.size if msg.file else 0) or 0
@@ -1990,22 +1994,22 @@ async def master_handler(event):
                     if exact_size > MAX_MEDIA_SIZE_BYTES:
                         if item_is_video and OVERSIZED_VIDEO_ACTION in ("split", "compress"):
                             if exact_size > OVERSIZED_VIDEO_MAX_INPUT_BYTES:
-                                logging.warning(
+                                logger.warning(
                                     f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) "
                                     f"exceeds maximum allowed size for processing ({OVERSIZED_VIDEO_MAX_INPUT_MB} MB)"
                                 )
                                 continue
-                            logging.info(
+                            logger.info(
                                 f"[{chat_identifier}] Oversized video in album ({round(exact_size / (1024 * 1024), 2)} MB > "
                                 f"{MAX_MEDIA_SIZE_MB} MB). Will {OVERSIZED_VIDEO_ACTION} after download."
                             )
                         else:
-                            logging.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({MAX_MEDIA_SIZE_MB} MB)")
+                            logger.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({MAX_MEDIA_SIZE_MB} MB)")
                             continue
 
                 await process_and_upload_media(msg, chat_identifier, channel_display)
         except Exception as e:
-            logging.error(f"[{chat_identifier}] Error loading album {album_id}: {e}")
+            logger.error(f"[{chat_identifier}] Error loading album {album_id}: {e}")
     else:
         await process_and_upload_media(event.message, chat_identifier, channel_display)
 
@@ -2040,14 +2044,14 @@ async def on_matrix_response(response):
     )
 
     if not is_auth_error:
-        logging.error(f"Matrix sync error: {status} {message}".strip())
+        logger.error(f"Matrix sync error: {status} {message}".strip())
         return
 
     if MATRIX_SYNC_AUTH_FAILED:
         return
 
     MATRIX_SYNC_AUTH_FAILED = True
-    logging.critical(
+    logger.critical(
         f"Matrix rejected the access token ({status} {message}). Interactive commands stay "
         f"disabled until MATRIX_ACCESS_TOKEN is replaced and the bridge is restarted."
     )
@@ -2066,53 +2070,53 @@ async def matrix_sync_loop():
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logging.error(f"Matrix sync stopped with an error: {e!r}")
+            logger.error(f"Matrix sync stopped with an error: {e!r}")
         else:
             if MATRIX_SYNC_AUTH_FAILED:
-                logging.error("Matrix sync supervisor stopping: the access token was rejected.")
+                logger.error("Matrix sync supervisor stopping: the access token was rejected.")
                 return
-            logging.warning("Matrix sync loop returned unexpectedly.")
+            logger.warning("Matrix sync loop returned unexpectedly.")
 
         ran_for = time.monotonic() - started
         if ran_for >= MATRIX_SYNC_STABLE_SECONDS:
             backoff = MATRIX_SYNC_INITIAL_BACKOFF_SECONDS
 
-        logging.info(f"Restarting Matrix sync in {backoff}s (last run lasted {ran_for:.0f}s).")
+        logger.info(f"Restarting Matrix sync in {backoff}s (last run lasted {ran_for:.0f}s).")
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, MATRIX_SYNC_MAX_BACKOFF_SECONDS)
 
 
 async def main():
-    logging.info("Starting Telegram client...")
+    logger.info("Starting Telegram client...")
     await tg_client.start()
-    logging.info(f"Bridge successfully started and active for channels: {TG_CHANNELS}")
-    logging.info(f"Target Matrix rooms: {MATRIX_ROOM_IDS}")
-    logging.info(f"Configured max media limit: {MAX_MEDIA_SIZE_MB} MB")
-    logging.info(
+    logger.info(f"Bridge successfully started and active for channels: {TG_CHANNELS}")
+    logger.info(f"Target Matrix rooms: {MATRIX_ROOM_IDS}")
+    logger.info(f"Configured max media limit: {MAX_MEDIA_SIZE_MB} MB")
+    logger.info(
         f"Oversized video action: {OVERSIZED_VIDEO_ACTION.upper()} "
         f"(Max input: {OVERSIZED_VIDEO_MAX_INPUT_MB} MB, Fallback compress: {OVERSIZED_VIDEO_FALLBACK_COMPRESS})"
     )
-    logging.info(f"Configured min image limit: {MIN_IMAGE_SIZE_KB} KB ({round(MIN_IMAGE_SIZE_KB / 1024, 2)} MB)" if MIN_IMAGE_SIZE_KB > 0 else "Configured min image limit: None")
-    logging.info(f"Configured min video limit: {MIN_VIDEO_SIZE_KB} KB ({round(MIN_VIDEO_SIZE_KB / 1024, 2)} MB)" if MIN_VIDEO_SIZE_KB > 0 else "Configured min video limit: None")
-    logging.info(f"Images enabled: {ENABLE_IMAGES}")
-    logging.info(f"Videos enabled: {ENABLE_VIDEOS}")
-    logging.info(f"Media deduplication: {'Enabled' if DEDUPLICATION_ENABLED else 'Disabled'} (TTL: {DEDUPLICATION_TTL_MINUTES} min, Max cache: {DEDUPLICATION_CACHE_SIZE})")
+    logger.info(f"Configured min image limit: {MIN_IMAGE_SIZE_KB} KB ({round(MIN_IMAGE_SIZE_KB / 1024, 2)} MB)" if MIN_IMAGE_SIZE_KB > 0 else "Configured min image limit: None")
+    logger.info(f"Configured min video limit: {MIN_VIDEO_SIZE_KB} KB ({round(MIN_VIDEO_SIZE_KB / 1024, 2)} MB)" if MIN_VIDEO_SIZE_KB > 0 else "Configured min video limit: None")
+    logger.info(f"Images enabled: {ENABLE_IMAGES}")
+    logger.info(f"Videos enabled: {ENABLE_VIDEOS}")
+    logger.info(f"Media deduplication: {'Enabled' if DEDUPLICATION_ENABLED else 'Disabled'} (TTL: {DEDUPLICATION_TTL_MINUTES} min, Max cache: {DEDUPLICATION_CACHE_SIZE})")
 
     matrix_sync_task = None
     if ADMIN_MATRIX_USER_ID or ALLOW_NON_ADMIN_STOP:
-        logging.info(f"Matrix command listener active (Admin User: {ADMIN_MATRIX_USER_ID or 'None'}, Allow Non-Admin Stop: {ALLOW_NON_ADMIN_STOP})")
+        logger.info(f"Matrix command listener active (Admin User: {ADMIN_MATRIX_USER_ID or 'None'}, Allow Non-Admin Stop: {ALLOW_NON_ADMIN_STOP})")
         matrix_client.add_event_callback(on_matrix_message, RoomMessageText)
         matrix_client.add_response_callback(on_matrix_response, SyncError)
         matrix_sync_task = asyncio.create_task(matrix_sync_loop())
     else:
-        logging.info("Admin Matrix user (ADMIN_MATRIX_USER_ID) and ALLOW_NON_ADMIN_STOP not configured. Dynamic chat commands disabled.")
+        logger.info("Admin Matrix user (ADMIN_MATRIX_USER_ID) and ALLOW_NON_ADMIN_STOP not configured. Dynamic chat commands disabled.")
 
-    logging.info(f"Llama Guard Moderation: {'Enabled' if LLAMAGUARD_API_URL else 'Disabled'}")
+    logger.info(f"Llama Guard Moderation: {'Enabled' if LLAMAGUARD_API_URL else 'Disabled'}")
     if LLAMAGUARD_API_URL:
-        logging.info(f"Llama Guard Model: {LLAMAGUARD_MODEL_NAME}")
-        logging.info(f"Llama Guard Video Frames: {LLAMAGUARD_VIDEO_FRAMES} (Random Selection: {LLAMAGUARD_RANDOM_FRAMES})")
-        logging.info(f"Llama Guard Checks Filter (Block List): {list(LLAMAGUARD_CHECKS) if LLAMAGUARD_CHECKS else 'ALL categories'}")
-        logging.info(f"Llama Guard Required Checks (Whitelist): {list(LLAMAGUARD_REQUIRE_CHECKS) if LLAMAGUARD_REQUIRE_CHECKS else 'None (safe content allowed)'}")
+        logger.info(f"Llama Guard Model: {LLAMAGUARD_MODEL_NAME}")
+        logger.info(f"Llama Guard Video Frames: {LLAMAGUARD_VIDEO_FRAMES} (Random Selection: {LLAMAGUARD_RANDOM_FRAMES})")
+        logger.info(f"Llama Guard Checks Filter (Block List): {list(LLAMAGUARD_CHECKS) if LLAMAGUARD_CHECKS else 'ALL categories'}")
+        logger.info(f"Llama Guard Required Checks (Whitelist): {list(LLAMAGUARD_REQUIRE_CHECKS) if LLAMAGUARD_REQUIRE_CHECKS else 'None (safe content allowed)'}")
     try:
         await tg_client.run_until_disconnected()
     finally:
