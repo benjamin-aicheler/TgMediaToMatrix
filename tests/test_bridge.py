@@ -503,3 +503,23 @@ def test_log_records_use_the_module_logger(bridge, caplog):
     module_records = [r for r in caplog.records if r.name == "tgmabr"]
     assert module_records, [r.name for r in caplog.records]
     assert any("Could not fetch topic name" in r.getMessage() for r in module_records)
+
+
+def test_ffprobe_stdout_returns_none_on_timeout(bridge, tmp_path):
+    script = tmp_path / "ffprobe"
+    script.write_text("#!/bin/sh\nsleep 2\n")
+    script.chmod(0o755)
+
+    assert bridge.ffprobe_stdout(str(script), ["-version"], timeout=0.2) is None
+
+
+def test_ffprobe_stdout_surfaces_programming_errors(bridge, monkeypatch):
+    """The narrowed except must not turn a bug into a silent "no output"."""
+
+    def broken_run(*args, **kwargs):
+        raise TypeError("ffprobe_bin must be a string")
+
+    monkeypatch.setattr(bridge.subprocess, "run", broken_run)
+
+    with pytest.raises(TypeError):
+        bridge.ffprobe_stdout("/usr/bin/ffprobe", ["-version"])
