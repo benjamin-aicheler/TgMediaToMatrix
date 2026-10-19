@@ -231,8 +231,21 @@ except Exception as init_err:
     logging.critical(f"Configuration initialization failed: {init_err}")
     raise
 
-# Cache for already processed album IDs
-PROCESSED_ALBUMS = set()
+# Guard against handling the same album twice: album_id -> monotonic timestamp of the first
+# message we saw. Entries live for ALBUM_GUARD_TTL_SECONDS, long enough that a lagging album
+# message cannot start a second pass. This replaces the old "sleep(10) after every album"
+# trick, which kept the guard open by blocking the whole update loop.
+ALBUM_GUARD_TTL_SECONDS = 60
+PROCESSED_ALBUMS = {}
+
+
+def album_already_processed(album_id) -> bool:
+    """True while this album is still inside its guard window. Also drops stale entries."""
+    now = time.monotonic()
+    for key, seen_at in list(PROCESSED_ALBUMS.items()):
+        if now - seen_at > ALBUM_GUARD_TTL_SECONDS:
+            del PROCESSED_ALBUMS[key]
+    return album_id in PROCESSED_ALBUMS
 
 
 class MediaDeduplicator:
@@ -1774,53 +1787,52 @@ async def master_handler(event):
 
     if event.message.grouped_id is not None:
         album_id = event.message.grouped_id
-        
-        if album_id in PROCESSED_ALBUMS:
+
+        if album_already_processed(album_id):
             return
-            
-        PROCESSED_ALBUMS.add(album_id)
+
+        PROCESSED_ALBUMS[album_id] = time.monotonic()
         logging.info(f"[{chat_identifier}] New album detected (Grouped ID: {album_id}). Waiting for complete reception...")
-        
+
+        # Short grace period so Telegram can deliver the remaining album items. The guard
+        # entry is deliberately not released afterwards: it expires via ALBUM_GUARD_TTL_SECONDS,
+        # which keeps a lagging album message from starting a second pass without stalling
+        # every other update for ten seconds.
+        await asyncio.sleep(2.5)
+
         try:
-            await asyncio.sleep(2.5)
-            
-            try:
-                album_messages = await tg_client.get_messages(
-                    event.chat_id, 
-                    min_id=event.message.id - 15, 
-                    max_id=event.message.id + 15,
-                    limit=30
-                )
-                filtered_messages = [m for m in album_messages if m.grouped_id == album_id]
-                
-                logging.info(f"[{chat_identifier}] Processing {len(filtered_messages)} items from album {album_id}...")
-                for msg in reversed(filtered_messages):
-                    if msg.media:
-                        exact_size = (msg.file.size if msg.file else 0) or 0
-                        item_is_video = is_video_message(msg)
-                        if exact_size > MAX_MEDIA_SIZE_BYTES:
-                            if item_is_video and OVERSIZED_VIDEO_ACTION in ("split", "compress"):
-                                if exact_size > OVERSIZED_VIDEO_MAX_INPUT_BYTES:
-                                    logging.warning(
-                                        f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) "
-                                        f"exceeds maximum allowed size for processing ({OVERSIZED_VIDEO_MAX_INPUT_MB} MB)"
-                                    )
-                                    continue
-                                logging.info(
-                                    f"[{chat_identifier}] Oversized video in album ({round(exact_size / (1024 * 1024), 2)} MB > "
-                                    f"{MAX_MEDIA_SIZE_MB} MB). Will {OVERSIZED_VIDEO_ACTION} after download."
+            album_messages = await tg_client.get_messages(
+                event.chat_id,
+                min_id=event.message.id - 15,
+                max_id=event.message.id + 15,
+                limit=30
+            )
+            filtered_messages = [m for m in album_messages if m.grouped_id == album_id]
+
+            logging.info(f"[{chat_identifier}] Processing {len(filtered_messages)} items from album {album_id}...")
+            for msg in reversed(filtered_messages):
+                if msg.media:
+                    exact_size = (msg.file.size if msg.file else 0) or 0
+                    item_is_video = is_video_message(msg)
+                    if exact_size > MAX_MEDIA_SIZE_BYTES:
+                        if item_is_video and OVERSIZED_VIDEO_ACTION in ("split", "compress"):
+                            if exact_size > OVERSIZED_VIDEO_MAX_INPUT_BYTES:
+                                logging.warning(
+                                    f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) "
+                                    f"exceeds maximum allowed size for processing ({OVERSIZED_VIDEO_MAX_INPUT_MB} MB)"
                                 )
-                            else:
-                                logging.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({MAX_MEDIA_SIZE_MB} MB)")
                                 continue
-                        
-                    await process_and_upload_media(msg, chat_identifier, channel_display)
-            except Exception as e:
-                logging.error(f"[{chat_identifier}] Error loading album {album_id}: {e}")
-                
-            await asyncio.sleep(10)
-        finally:
-            PROCESSED_ALBUMS.discard(album_id)
+                            logging.info(
+                                f"[{chat_identifier}] Oversized video in album ({round(exact_size / (1024 * 1024), 2)} MB > "
+                                f"{MAX_MEDIA_SIZE_MB} MB). Will {OVERSIZED_VIDEO_ACTION} after download."
+                            )
+                        else:
+                            logging.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({MAX_MEDIA_SIZE_MB} MB)")
+                            continue
+
+                await process_and_upload_media(msg, chat_identifier, channel_display)
+        except Exception as e:
+            logging.error(f"[{chat_identifier}] Error loading album {album_id}: {e}")
     else:
         await process_and_upload_media(event.message, chat_identifier, channel_display)
 
