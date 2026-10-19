@@ -8,6 +8,7 @@ import subprocess
 import asyncio
 import logging
 import hashlib
+import html
 from collections import OrderedDict
 from enum import Enum
 from telethon import TelegramClient, events
@@ -1327,7 +1328,7 @@ async def on_matrix_message(room, event: RoomMessageText):
             await send_matrix_notice(room.room_id, msg_plain, msg_html)
         else:
             invalid_plain = f"[TgMediaToMatrix] Unknown action '{action}'. Use 'enable' or 'disable'."
-            invalid_html = f"<strong>[TgMediaToMatrix]</strong> Unknown action <code>{action}</code>. Use <code>enable</code> or <code>disable</code>."
+            invalid_html = f"<strong>[TgMediaToMatrix]</strong> Unknown action <code>{html.escape(action)}</code>. Use <code>enable</code> or <code>disable</code>."
             await send_matrix_notice(room.room_id, invalid_plain, invalid_html)
         return
 
@@ -1355,12 +1356,12 @@ async def on_matrix_message(room, event: RoomMessageText):
             await send_matrix_notice(room.room_id, msg_plain, msg_html)
         else:
             invalid_plain = f"[TgMediaToMatrix] Unknown action '{action}'. Use 'enable' or 'disable'."
-            invalid_html = f"<strong>[TgMediaToMatrix]</strong> Unknown action <code>{action}</code>. Use <code>enable</code> or <code>disable</code>."
+            invalid_html = f"<strong>[TgMediaToMatrix]</strong> Unknown action <code>{html.escape(action)}</code>. Use <code>enable</code> or <code>disable</code>."
             await send_matrix_notice(room.room_id, invalid_plain, invalid_html)
         return
 
     unknown_plain = f"[TgMediaToMatrix] Unknown command '{body}'. Type '!tmmb help' for usage."
-    unknown_html = f"<strong>[TgMediaToMatrix]</strong> Unknown command <code>{body}</code>. Type <code>!tmmb help</code> for usage."
+    unknown_html = f"<strong>[TgMediaToMatrix]</strong> Unknown command <code>{html.escape(body)}</code>. Type <code>!tmmb help</code> for usage."
     await send_matrix_notice(room.room_id, unknown_plain, unknown_html)
 
 
