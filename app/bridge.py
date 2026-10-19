@@ -466,17 +466,70 @@ def is_video_message(message) -> bool:
     return False
 
 
-def get_temp_dir() -> str | None:
-    """Returns /dev/shm (shared-memory ramdisk) if available with adequate space, otherwise None (system default /tmp)."""
-    if os.path.exists("/dev/shm"):
-        try:
-            stat = os.statvfs("/dev/shm")
-            free_bytes = stat.f_bavail * stat.f_frsize
-            if free_bytes > 200 * 1024 * 1024:
-                return "/dev/shm"
-        except Exception:
-            pass
-    return None
+SHM_PATH = "/dev/shm"
+# Scratch space is only ever taken from the ramdisk; if it does not fit, the media is skipped.
+SHM_HEADROOM_BYTES = 64 * 1024 * 1024
+
+try:
+    SHM_WAIT_TIMEOUT_SECONDS = max(0, int(os.environ.get("SHM_WAIT_TIMEOUT_SECONDS", "30")))
+except ValueError:
+    SHM_WAIT_TIMEOUT_SECONDS = 30
+
+
+def shm_space() -> tuple[int, int] | None:
+    """Returns (total, free) bytes on the ramdisk, or None when it is not available."""
+    if not os.path.isdir(SHM_PATH):
+        return None
+    try:
+        stat = os.statvfs(SHM_PATH)
+    except OSError:
+        return None
+    return stat.f_blocks * stat.f_frsize, stat.f_bavail * stat.f_frsize
+
+
+def shm_required_bytes(media_size: int) -> int:
+    """Scratch space a split or compression run needs: the input plus the produced parts."""
+    return int(media_size * 2) + SHM_HEADROOM_BYTES
+
+
+async def reserve_shm_space(required_bytes: int, source_chat: str, filename: str) -> bool:
+    """Waits (bounded) for enough room on the ramdisk.
+
+    Returns False when the media has to be skipped. There is deliberately no fallback to a
+    disk directory: if the ramdisk cannot hold the scratch data, the media is dropped.
+    """
+    space = shm_space()
+    if space is None:
+        logging.error(f"[{source_chat}] /dev/shm is not available; skipping {filename} because scratch data must not be written to disk.")
+        return False
+
+    total, free = space
+    if total < required_bytes:
+        logging.error(
+            f"[{source_chat}] {filename} needs {required_bytes / (1024 * 1024):.0f} MB of ramdisk, but /dev/shm "
+            f"only provides {total / (1024 * 1024):.0f} MB in total. Skipping."
+        )
+        return False
+
+    if free >= required_bytes:
+        return True
+
+    logging.warning(
+        f"[{source_chat}] Waiting up to {SHM_WAIT_TIMEOUT_SECONDS}s for ramdisk space: {filename} needs "
+        f"{required_bytes / (1024 * 1024):.0f} MB, {free / (1024 * 1024):.0f} MB free."
+    )
+    deadline = time.monotonic() + SHM_WAIT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        await asyncio.sleep(2)
+        current = shm_space()
+        if current is None:
+            return False
+        if current[1] >= required_bytes:
+            logging.info(f"[{source_chat}] Ramdisk space available again for {filename}.")
+            return True
+
+    logging.warning(f"[{source_chat}] Still not enough ramdisk space for {filename} after {SHM_WAIT_TIMEOUT_SECONDS}s. Skipping.")
+    return False
 
 
 def probe_video_duration(video_path: str, ffmpeg_bin: str) -> float | None:
@@ -577,8 +630,11 @@ def split_video_lossless(
     target_part_size = max_bytes * 0.85
     parts_count = max(2, math.ceil(total_size / target_part_size))
 
-    temp_dir_parent = get_temp_dir()
-    with tempfile.TemporaryDirectory(dir=temp_dir_parent) as tmp_dir:
+    if not os.path.isdir(SHM_PATH):
+        logging.error(f"[{source_chat}] /dev/shm is not available. Splitting is skipped instead of writing to disk.")
+        return []
+
+    with tempfile.TemporaryDirectory(dir=SHM_PATH) as tmp_dir:
         input_path = os.path.join(tmp_dir, f"input{ext}")
         with open(input_path, "wb") as f:
             f.write(video_bytes)
@@ -698,8 +754,11 @@ def compress_video(
     name_part, ext = os.path.splitext(filename)
     out_ext = ".mp4"
 
-    temp_dir_parent = get_temp_dir()
-    with tempfile.TemporaryDirectory(dir=temp_dir_parent) as tmp_dir:
+    if not os.path.isdir(SHM_PATH):
+        logging.error(f"[{source_chat}] /dev/shm is not available. Compression is skipped instead of writing to disk.")
+        return None
+
+    with tempfile.TemporaryDirectory(dir=SHM_PATH) as tmp_dir:
         input_path = os.path.join(tmp_dir, f"input{ext or '.mp4'}")
         output_path = os.path.join(tmp_dir, f"output{out_ext}")
         with open(input_path, "wb") as f:
@@ -1657,6 +1716,14 @@ async def process_and_upload_media(message, source_chat, channel_name):
             f"[{source_chat}] Oversized video ({round(len(media_bytes) / (1024 * 1024), 2)} MB > "
             f"{MAX_MEDIA_SIZE_MB} MB). Action: {OVERSIZED_VIDEO_ACTION}..."
         )
+
+        # Scratch data must stay in RAM: wait for room, and skip the media rather than
+        # falling back to a disk directory.
+        if OVERSIZED_VIDEO_ACTION in ("split", "compress"):
+            required_scratch = shm_required_bytes(len(media_bytes))
+            if not await reserve_shm_space(required_scratch, source_chat, filename):
+                release_dedup_marks()
+                return
 
         if OVERSIZED_VIDEO_ACTION == "split":
             parts = await asyncio.to_thread(
