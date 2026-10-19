@@ -1,0 +1,4 @@
+# Test-only dependencies. Runtime dependencies live in requirements.txt.
+telethon
+matrix-nio
+pytest

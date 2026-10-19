@@ -372,9 +372,13 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
     """Extracts up to max_frames frames from the video as JPEG bytes in-memory (either evenly spaced or randomly selected)"""
     try:
         import av
-        from PIL import Image
+        import importlib.util
         import io
         import random
+        # Pillow is needed by av's frame.to_image(); check for it explicitly so the
+        # error message below stays accurate instead of failing deeper inside PyAV.
+        if importlib.util.find_spec("PIL") is None:
+            raise ImportError("Pillow (PIL) is not installed")
     except ImportError:
         logging.error("PygAV (av) or Pillow (PIL) package is missing! Please install them to enable video frame safety moderation.")
         return []
@@ -1204,7 +1208,7 @@ async def check_media_safety(media_bytes: bytes, mime_type: str, source_chat: st
     if LLAMAGUARD_REQUIRE_CHECKS:
         matched_required = False
         all_violated_matched = []
-        for i, (is_safe, violated) in enumerate(results):
+        for is_safe, violated in results:
             if not is_safe:
                 required_overlap = [c for c in violated if c in LLAMAGUARD_REQUIRE_CHECKS]
                 if required_overlap:
