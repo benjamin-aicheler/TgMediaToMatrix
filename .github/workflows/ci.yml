@@ -38,3 +38,31 @@ jobs:
 
       - name: Run tests
         run: pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t tgmabr:ci .
+
+      - name: Check the runtime user
+        run: |
+          uid="$(docker run --rm tgmabr:ci id -u)"
+          echo "runtime uid: $uid"
+          test "$uid" = "10001"
+
+      - name: Import the app as that user
+        # Proves that /app/session is writable for the unprivileged user: importing the
+        # modules makes Telethon create session/tgmabr.session there.
+        run: |
+          docker run --rm \
+            -e TG_API_ID=1 \
+            -e TG_API_HASH=testhash \
+            -e MATRIX_HOMESERVER=https://matrix.test.invalid \
+            -e MATRIX_ACCESS_TOKEN=testtoken \
+            -e TG_CHANNELS=testchannel \
+            -e MATRIX_ROOM_IDS='!room:matrix.test.invalid' \
+            --entrypoint python tgmabr:ci -c "import bridge, os; print('import ok as uid', os.getuid())"

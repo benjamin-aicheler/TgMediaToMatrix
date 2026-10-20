@@ -225,7 +225,6 @@ services:
     restart: unless-stopped
     shm_size: 1g
     volumes:
-      - ./app:/app
       - ./session_data:/app/session
     environment:
       - TG_API_ID=your_tg_api_id
@@ -248,8 +247,12 @@ services:
 On the very first run, Telethon needs to authenticate with your Telegram account (using your phone number and login code). To do this interactively, run the container with an interactive shell:
 
 ```bash
+mkdir -p session_data
+sudo chown -R 10001:10001 session_data
 docker compose run --rm telegram-matrix-bridge python bridge.py
 ```
+
+The `chown` is required once: the container runs as the unprivileged user `10001` (see `Dockerfile`), so the mounted session directory has to belong to that user. Without it, Telethon cannot create its session file and the container exits with `unable to open database file`.
 
 1. Enter your **phone number** (including country code, e.g. `+1234567890`).
 2. Enter the **login code** sent to your Telegram app.
