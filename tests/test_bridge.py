@@ -532,3 +532,27 @@ def test_entry_point_registers_the_telegram_handler(bridge):
     """Importing bridge must register the Telegram listener, or nothing would be bridged."""
     handlers = bridge.tg_client.list_event_handlers()
     assert handlers, "no Telegram event handler registered"
+
+
+# --- Session file permissions --------------------------------------------------------
+
+
+def test_session_file_is_not_world_readable(bridge):
+    """The Telethon session holds the account auth key; 0644 on a shared host is a leak."""
+    mode = bridge.session_file.stat().st_mode & 0o777
+    assert oct(mode) == "0o600", f"session file mode is {oct(mode)}"
+
+
+def test_restrict_session_permissions_tightens_an_existing_file(bridge, tmp_path):
+    session = tmp_path / "tgmabr"
+    session_file = tmp_path / "tgmabr.session"
+    session_file.write_text("auth key")
+    session_file.chmod(0o644)
+
+    bridge.state.restrict_session_permissions(str(session))
+
+    assert oct(session_file.stat().st_mode & 0o777) == "0o600"
+
+
+def test_restrict_session_permissions_ignores_missing_file(bridge, tmp_path):
+    bridge.state.restrict_session_permissions(str(tmp_path / "absent"))

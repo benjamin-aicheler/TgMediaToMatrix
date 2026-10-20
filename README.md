@@ -249,10 +249,13 @@ On the very first run, Telethon needs to authenticate with your Telegram account
 ```bash
 mkdir -p session_data
 sudo chown -R 10001:10001 session_data
+chmod 700 session_data
 docker compose run --rm telegram-matrix-bridge python bridge.py
 ```
 
 The `chown` is required once: the container runs as the unprivileged user `10001` (see `Dockerfile`), so the mounted session directory has to belong to that user. Without it, Telethon cannot create its session file and the container exits with `unable to open database file`.
+
+`chmod 700` keeps the directory private: `tgmabr.session` contains the Telegram auth key, which grants full access to the account. The bridge also sets the session file itself to `0600` on start-up, but the directory mode is what keeps other accounts on the host out. Do not put this folder into an unencrypted backup.
 
 1. Enter your **phone number** (including country code, e.g. `+1234567890`).
 2. Enter the **login code** sent to your Telegram app.

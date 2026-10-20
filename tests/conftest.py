@@ -87,7 +87,10 @@ def bridge_module(tmp_path_factory):
     finally:
         sys.path.remove(str(APP_DIR))
         os.chdir(previous_cwd)
-    return ModuleFacade(modules)
+
+    facade = ModuleFacade(modules)
+    object.__setattr__(facade, "session_file", workdir / "session" / "tgmabr.session")
+    return facade
 
 
 @pytest.fixture

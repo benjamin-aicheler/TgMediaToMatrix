@@ -1,6 +1,7 @@
 """Mutable runtime state: caches, counters, toggle flags and the API clients."""
 
 import logging
+import os
 import time
 from collections import OrderedDict
 
@@ -94,14 +95,33 @@ SAFETY_STATS = {"blocked": 0, "unavailable": 0}
 DELIVERY_STATS = {"failed": 0, "partial": 0}
 
 
+SESSION_PATH = "session/tgmabr"
+
+
+def restrict_session_permissions(session_base: str = SESSION_PATH) -> None:
+    """Telethon's session file holds the account auth key, so only its owner may read it.
+
+    The file is created by SQLiteSession when the client is constructed; the directory is
+    usually a mounted volume, where the default umask (022) would leave it world-readable.
+    """
+    session_file = f"{session_base}.session"
+    if not os.path.exists(session_file):
+        return
+    try:
+        os.chmod(session_file, 0o600)
+    except OSError as exc:
+        logger.warning(f"Could not restrict permissions on {session_file}: {exc}")
+
+
 tg_client = TelegramClient(
-    'session/tgmabr', 
+    SESSION_PATH, 
     config.TG_API_ID, 
     config.TG_API_HASH,
     device_model="Desktop",
     system_version="Windows 10",
     app_version="4.8.4"
 )
+restrict_session_permissions()
 
 # Initialize global Matrix client session
 matrix_client = AsyncClient(config.MATRIX_HOMESERVER)
