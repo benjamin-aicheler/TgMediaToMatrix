@@ -320,6 +320,7 @@ TgMediaToMatrix/
 │   └── handler.py           # Telegram event handling and channel/topic filtering
 ├── tests/                   # pytest suite, no network or ffmpeg required
 ├── session_data/            # Persistent Telegram session database (generated)
+├── AGENTS.md                # Development guidelines for AI agents (repo root, by convention)
 ├── .dockerignore            # Files excluded from Docker build context
 ├── Dockerfile               # Production container image definition
 ├── requirements.in          # Direct runtime dependencies (edited by hand)
