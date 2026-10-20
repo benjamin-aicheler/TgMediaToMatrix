@@ -289,6 +289,19 @@ docker compose up -d
 
 ---
 
+## Dependency Management
+
+`requirements.in` and `requirements-dev.in` hold the direct dependencies and are the only files edited by hand. The matching `requirements.txt` and `requirements-dev.txt` are generated locks: every transitive package is pinned there too, so the tested set and the set inside the image are the same.
+
+```bash
+uv pip compile requirements.in     --python-version 3.13 -o requirements.txt
+uv pip compile requirements-dev.in --python-version 3.13 -o requirements-dev.txt
+```
+
+Regenerate both after changing a `.in` file; never edit the generated files directly. Dependabot bumps the pinned versions (transitives included) and the CI actions every week, so the lock cannot rot.
+
+---
+
 ## File Structure
 
 ```bash
@@ -309,7 +322,8 @@ TgMediaToMatrix/
 ├── session_data/            # Persistent Telegram session database (generated)
 ├── .dockerignore            # Files excluded from Docker build context
 ├── Dockerfile               # Production container image definition
-├── requirements.txt         # Pinned Python package dependencies
+├── requirements.in          # Direct runtime dependencies (edited by hand)
+├── requirements.txt         # Generated lock: runtime deps incl. every transitive
 ├── docker-compose.yml       # Multi-container orchestration definition
 └── README.md                # Documentation file
 ```

@@ -1,0 +1,9 @@
+# Direct runtime dependencies. This file is the one to edit by hand; requirements.txt is
+# generated from it with `uv pip compile requirements.in --python-version 3.13 -o requirements.txt`.
+# A new dependency goes here, then regenerate the lock — never edit requirements.txt directly.
+telethon==1.45.0
+matrix-nio==0.26.0
+av==19.0.1
+Pillow==13.0.0
+blurhash==1.1.5
+imageio-ffmpeg==0.6.0
