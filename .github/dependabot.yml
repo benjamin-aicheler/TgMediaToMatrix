@@ -1,23 +1,30 @@
 # Dependabot keeps the three places fresh where versions would otherwise age silently:
 # the pinned Python dependencies, the digest-pinned base image, and the CI actions.
 # Grouping keeps the PR noise low; every PR still runs the normal CI before it is merged.
+# Dependency PRs land assigned to the maintainer so they are not lost in the notification stream.
 version: 2
 
 updates:
   # requirements.txt and requirements-dev.txt in the repo root. Minor and patch bumps
   # arrive as one grouped PR, majors arrive separately because they need a real review.
+  # Security advisories come as a single group instead of one PR per advisory.
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
     open-pull-requests-limit: 5
+    assignees: ["benjamin-aicheler"]
     commit-message:
       prefix: "chore(deps)"
     groups:
+      python-security:
+        patterns: ["*"]
+        applies-to: "security-updates"
       python-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+        applies-to: "version-updates"
 
   # The base image is pinned by digest, so nothing moves without a deliberate bump.
   # Dependabot surfaces that bump instead of leaving it to memory.
@@ -26,6 +33,7 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    assignees: ["benjamin-aicheler"]
     commit-message:
       prefix: "chore(deps)"
 
@@ -35,8 +43,10 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
+    assignees: ["benjamin-aicheler"]
     commit-message:
       prefix: "chore(deps)"
     groups:
       github-actions:
         patterns: ["*"]
+        applies-to: "version-updates"
