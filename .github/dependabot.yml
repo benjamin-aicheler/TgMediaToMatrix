@@ -28,6 +28,9 @@ updates:
 
   # The base image is pinned by digest, so nothing moves without a deliberate bump.
   # Dependabot surfaces that bump instead of leaving it to memory.
+  # Python series jumps stay ignored on purpose: 3.13 is supported until 2029 and the test
+  # suite only runs on 3.13, so a new series is a deliberate change (Dockerfile + ci.yml
+  # together), never a Dependabot merge. Patch-level digest updates inside 3.13 still come.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -36,6 +39,9 @@ updates:
     assignees: ["benjamin-aicheler"]
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "python"
+        versions: [">= 3.14"]
 
   # actions/checkout, setup-python, buildx and friends.
   - package-ecosystem: "github-actions"
