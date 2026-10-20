@@ -1,6 +1,9 @@
-telethon
-matrix-nio
-av
-Pillow
-blurhash
-imageio-ffmpeg
+# Runtime dependencies, pinned: the image must build reproducibly and an upstream release
+# must never change behaviour without a deliberate bump. Bump this file and the matching
+# versions in requirements-dev.txt together, then let CI build the image before merging.
+telethon==1.45.0
+matrix-nio==0.26.0
+av==19.0.1
+Pillow==13.0.0
+blurhash==1.1.5
+imageio-ffmpeg==0.6.0
