@@ -291,7 +291,15 @@ TgMediaToMatrix/
 │   └── workflows/
 │       └── docker-build.yml # Automated multi-arch CI/CD workflow
 ├── app/
-│   └── bridge.py            # Core bridge python application
+│   ├── bridge.py            # Entry point: client wiring and the Matrix sync supervisor
+│   ├── config.py            # Logging, environment parsing and tunable values
+│   ├── state.py             # Mutable runtime state (caches, counters, toggles, clients)
+│   ├── media.py             # ffprobe/ffmpeg work, frames, thumbnails, blurhashes, ramdisk
+│   ├── safety.py            # Llama Guard classification and verdict aggregation
+│   ├── matrix_io.py         # Matrix notices and media events
+│   ├── commands.py          # The !tmmb command handler
+│   └── handler.py           # Telegram event handling and channel/topic filtering
+├── tests/                   # pytest suite, no network or ffmpeg required
 ├── session_data/            # Persistent Telegram session database (generated)
 ├── .dockerignore            # Files excluded from Docker build context
 ├── Dockerfile               # Production container image definition

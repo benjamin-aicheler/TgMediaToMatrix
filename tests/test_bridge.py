@@ -523,3 +523,12 @@ def test_ffprobe_stdout_surfaces_programming_errors(bridge, monkeypatch):
 
     with pytest.raises(TypeError):
         bridge.ffprobe_stdout("/usr/bin/ffprobe", ["-version"])
+
+
+# --- Wiring --------------------------------------------------------------------------
+
+
+def test_entry_point_registers_the_telegram_handler(bridge):
+    """Importing bridge must register the Telegram listener, or nothing would be bridged."""
+    handlers = bridge.tg_client.list_event_handlers()
+    assert handlers, "no Telegram event handler registered"

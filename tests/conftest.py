@@ -33,11 +33,40 @@ MUTABLE_GLOBALS = (
 )
 
 
+class ModuleFacade:
+    """Presents the split app modules as one namespace.
+
+    Reads and writes are routed to the module that actually owns the name, so patching
+    ``bridge.SHM_WAIT_TIMEOUT_SECONDS`` still reaches ``config`` where the value is read at
+    call time. Without the write-through, ``monkeypatch`` would only shadow the attribute on
+    the facade.
+    """
+
+    def __init__(self, modules):
+        object.__setattr__(self, "_modules", modules)
+
+    def __getattr__(self, name):
+        for module in object.__getattribute__(self, "_modules"):
+            if hasattr(module, name):
+                return getattr(module, name)
+        raise AttributeError(f"{name} is not defined by any app module")
+
+    def __setattr__(self, name, value):
+        for module in object.__getattribute__(self, "_modules"):
+            if hasattr(module, name):
+                setattr(module, name, value)
+                return
+        raise AttributeError(f"{name} is not defined by any app module")
+
+
+MODULE_NAMES = ("config", "state", "media", "safety", "matrix_io", "commands", "handler")
+
+
 @pytest.fixture(scope="session")
 def bridge_module(tmp_path_factory):
-    """Imports app/bridge.py once per session.
+    """Imports the app package once per session and returns it behind a facade.
 
-    Importing the module constructs TelegramClient('session/tgmabr'), and Telethon's SQLite
+    Importing the modules constructs TelegramClient('session/tgmabr'), and Telethon's SQLite
     session needs that directory to exist relative to the current working directory. A
     temporary directory keeps the session file out of the repository.
     """
@@ -49,11 +78,16 @@ def bridge_module(tmp_path_factory):
     os.environ.update(REQUIRED_ENV)
     sys.path.insert(0, str(APP_DIR))
     try:
-        module = importlib.import_module("bridge")
+        importlib.import_module("bridge")
+        # Only bridge may import the others: if it stops pulling in (say) handler,
+        # the Telegram listener would never register and this must fail loudly.
+        missing = [name for name in MODULE_NAMES if name not in sys.modules]
+        assert not missing, f"importing bridge did not load: {missing}"
+        modules = [sys.modules[name] for name in MODULE_NAMES]
     finally:
         sys.path.remove(str(APP_DIR))
         os.chdir(previous_cwd)
-    return module
+    return ModuleFacade(modules)
 
 
 @pytest.fixture
