@@ -70,7 +70,7 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `VIDEO_COMPRESSION_PRESET` | FFmpeg x264 preset (`ultrafast`, `veryfast`, `fast`, etc.) | `veryfast` (Default: `veryfast`) |
 | `VIDEO_COMPRESSION_CRF` | Constant Rate Factor for video re-encoding (26–30 recommended) | `28` (Default: `28`) |
 | `VIDEO_COMPRESSION_THREADS` | Number of CPU threads allocated to FFmpeg | `2` (Default: `2`) |
-| `MIN_IMAGE_SIZE_KB` | Minimum file size in KB for images to be forwarded | `100` (Default: `0` / Disabled) |
+| `MIN_IMAGE_SIZE_KB` | Minimum file size in KB for images to be forwarded (accepts `MIN_IMAGE_SIZE_MB`) | `100` (Default: `0` / Disabled) |
 | `MIN_VIDEO_SIZE_KB` | Minimum file size in KB for videos to be forwarded (accepts `MIN_VIDEO_SIZE_MB`) | `1024` (Default: `0` / Disabled) |
 | `ENABLE_IMAGES` | Set to `false` to disable bridging of images | `true` (Default: `true`) |
 | `ENABLE_VIDEOS` | Set to `false` to disable bridging of videos | `true` (Default: `true`) |
@@ -277,9 +277,14 @@ docker compose logs -f tg_matrix_media_bridge
 
 ---
 
-## Automated Multi-Arch Builds (GitHub Actions)
+## Automated Multi-Arch Builds and CI (GitHub Actions)
 
-A GitHub Actions workflow (`.github/workflows/docker-build.yml`) is configured to automatically build and push multi-architecture Docker images (`linux/amd64` and `linux/arm64`) to the GitHub Container Registry (`ghcr.io/benjamin-aicheler/tgmediatomatrix:main`) on every push to the `main` branch.
+Two workflows back this repository:
+
+- `ci.yml` runs on every push and pull request: `ruff check --extend-select B,LOG,BLE`, the `pytest` suite, and a real `docker build` of the image that also asserts the runtime user is UID `10001` and that `/app/session` is writable for it.
+- `docker-build.yml` builds and pushes multi-architecture images (`linux/amd64` and `linux/arm64`) to the GitHub Container Registry (`ghcr.io/benjamin-aicheler/tgmediatomatrix:main`) on every push to `main`.
+
+Dependabot keeps the pinned dependencies, the CI actions and the base image digest current; see [Dependency Management](#dependency-management). CodeQL code scanning runs as GitHub's default setup and reports on pull requests.
 
 This ensures Raspberry Pi 4 (`arm64`) and x86_64 servers can pull prebuilt, instant-startup images without building or installing packages locally:
 ```bash
@@ -308,6 +313,7 @@ Regenerate both after changing a `.in` file; never edit the generated files dire
 TgMediaToMatrix/
 ├── .github/
 │   └── workflows/
+│       ├── ci.yml           # Lint, tests and image build on every push and PR
 │       └── docker-build.yml # Automated multi-arch CI/CD workflow
 ├── app/
 │   ├── bridge.py            # Entry point: client wiring and the Matrix sync supervisor
@@ -325,6 +331,8 @@ TgMediaToMatrix/
 ├── Dockerfile               # Production container image definition
 ├── requirements.in          # Direct runtime dependencies (edited by hand)
 ├── requirements.txt         # Generated lock: runtime deps incl. every transitive
+├── requirements-dev.in      # Direct test dependencies (edited by hand)
+├── requirements-dev.txt     # Generated lock: test deps incl. every transitive
 ├── docker-compose.yml       # Multi-container orchestration definition
 └── README.md                # Documentation file
 ```
