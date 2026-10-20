@@ -1,18 +1,26 @@
-import os
-import io
-import time
-import math
-import shutil
-import tempfile
-import subprocess
 import asyncio
-import logging
 import hashlib
 import html
+import io
+import logging
+import math
+import os
+import shutil
+import subprocess
+import tempfile
+import time
 from collections import OrderedDict
 from enum import Enum
+
+from nio import (
+    AsyncClient,
+    RoomMessageText,
+    RoomSendError,
+    RoomSendResponse,
+    SyncError,
+    UploadResponse,
+)
 from telethon import TelegramClient, events
-from nio import AsyncClient, UploadResponse, RoomSendResponse, RoomSendError, RoomMessageText, SyncError
 
 # Set up professional logging format
 logging.basicConfig(
@@ -63,11 +71,11 @@ try:
     ADMIN_MATRIX_USER_ID = os.environ.get("ADMIN_MATRIX_USER_ID", "").strip() or None
     ALLOW_NON_ADMIN_STOP = get_env_bool("ALLOW_NON_ADMIN_STOP", False)
 
-    MAX_MEDIA_SIZE_MB = int(os.environ.get("MAX_MEDIA_SIZE_MB", 50))
+    MAX_MEDIA_SIZE_MB = int(os.environ.get("MAX_MEDIA_SIZE_MB", "50"))
     MAX_MEDIA_SIZE_BYTES = MAX_MEDIA_SIZE_MB * 1024 * 1024
 
     try:
-        MIN_IMAGE_SIZE_KB = int(os.environ.get("MIN_IMAGE_SIZE_KB", 0))
+        MIN_IMAGE_SIZE_KB = int(os.environ.get("MIN_IMAGE_SIZE_KB", "0"))
     except ValueError:
         MIN_IMAGE_SIZE_KB = 0
     if MIN_IMAGE_SIZE_KB == 0 and os.environ.get("MIN_IMAGE_SIZE_MB"):
@@ -78,7 +86,7 @@ try:
     MIN_IMAGE_SIZE_BYTES = MIN_IMAGE_SIZE_KB * 1024
 
     try:
-        MIN_VIDEO_SIZE_KB = int(os.environ.get("MIN_VIDEO_SIZE_KB", 0))
+        MIN_VIDEO_SIZE_KB = int(os.environ.get("MIN_VIDEO_SIZE_KB", "0"))
     except ValueError:
         MIN_VIDEO_SIZE_KB = 0
     if MIN_VIDEO_SIZE_KB == 0 and os.environ.get("MIN_VIDEO_SIZE_MB"):
@@ -97,8 +105,7 @@ try:
 
     try:
         OVERSIZED_VIDEO_MAX_INPUT_MB = int(os.environ.get("OVERSIZED_VIDEO_MAX_INPUT_MB", "250"))
-        if OVERSIZED_VIDEO_MAX_INPUT_MB < MAX_MEDIA_SIZE_MB:
-            OVERSIZED_VIDEO_MAX_INPUT_MB = MAX_MEDIA_SIZE_MB
+        OVERSIZED_VIDEO_MAX_INPUT_MB = max(OVERSIZED_VIDEO_MAX_INPUT_MB, MAX_MEDIA_SIZE_MB)
     except ValueError:
         OVERSIZED_VIDEO_MAX_INPUT_MB = 250
     OVERSIZED_VIDEO_MAX_INPUT_BYTES = OVERSIZED_VIDEO_MAX_INPUT_MB * 1024 * 1024
@@ -156,8 +163,7 @@ try:
 
     try:
         LLAMAGUARD_VIDEO_FRAMES = int(os.environ.get("LLAMAGUARD_VIDEO_FRAMES", "5"))
-        if LLAMAGUARD_VIDEO_FRAMES < 1:
-            LLAMAGUARD_VIDEO_FRAMES = 1
+        LLAMAGUARD_VIDEO_FRAMES = max(LLAMAGUARD_VIDEO_FRAMES, 1)
     except ValueError:
         LLAMAGUARD_VIDEO_FRAMES = 5
 
@@ -266,7 +272,7 @@ class MediaDeduplicator:
     def _cleanup(self, now: float):
         # Evict expired entries from the left (oldest inserted)
         while self._cache:
-            oldest_key, oldest_ts = next(iter(self._cache.items()))
+            oldest_ts = next(iter(self._cache.values()))
             if now - oldest_ts > self.ttl_seconds:
                 self._cache.popitem(last=False)
             else:
@@ -381,10 +387,11 @@ async def get_topic_name(client, chat_entity, topic_id):
 def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bool = True) -> list:
     """Extracts up to max_frames frames from the video as JPEG bytes in-memory (either evenly spaced or randomly selected)"""
     try:
-        import av
         import importlib.util
         import io
         import random
+
+        import av
         # Pillow is needed by av's frame.to_image(); check for it explicitly so the
         # error message below stays accurate instead of failing deeper inside PyAV.
         if importlib.util.find_spec("PIL") is None:
@@ -434,11 +441,10 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
             # Keep bounds
             target_indices = [max(0, min(total_frames - 1, idx)) for idx in target_indices]
             # Ensure unique, sorted indices
-            target_indices = sorted(list(set(target_indices)))
+            target_indices = sorted(set(target_indices))
 
         target_set = set(target_indices)
-        frame_count = 0
-        for frame in container.decode(video=0):
+        for frame_count, frame in enumerate(container.decode(video=0)):
             if frame_count in target_set:
                 img = frame.to_image()
                 img_bytes_io = io.BytesIO()
@@ -446,7 +452,6 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
                 frames_bytes.append(img_bytes_io.getvalue())
                 if len(frames_bytes) >= len(target_set):
                     break
-            frame_count += 1
 
         # Fallback if no frames were decoded but we expected them
         if not frames_bytes:
@@ -464,8 +469,8 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
         if container is not None:
             try:
                 container.close()
-            except Exception:  # noqa: BLE001 - closing a broken container may raise anything; the frames are already collected
-                pass
+            except Exception as e:  # noqa: BLE001 - closing a broken container may raise anything; the frames are already collected
+                logger.debug(f"Could not close the video container: {e}")
     return frames_bytes
 
 
@@ -564,7 +569,7 @@ def ffprobe_stdout(ffprobe_bin: str, args: list[str], timeout: float = FFPROBE_T
     try:
         res = subprocess.run(
             [ffprobe_bin, "-v", "error", *args],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=timeout
+            capture_output=True, text=True, check=False, timeout=timeout
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -604,8 +609,8 @@ def probe_video_duration(video_path: str, ffmpeg_bin: str) -> float | None:
         container.close()
         if dur and dur > 0:
             return dur
-    except Exception:  # noqa: BLE001 - av fallback for duration: any library failure means the value is unknown
-        pass
+    except Exception as e:  # noqa: BLE001 - av fallback for duration: any library failure means the value is unknown
+        logger.debug(f"Could not probe duration with av: {e}")
 
     return None
 
@@ -636,8 +641,8 @@ def probe_video_dimensions(video_path: str, ffmpeg_bin: str) -> tuple[int, int] 
                 container.close()
                 return dims
         container.close()
-    except Exception:  # noqa: BLE001 - av fallback for dimensions: any library failure means the value is unknown
-        pass
+    except Exception as e:  # noqa: BLE001 - av fallback for dimensions: any library failure means the value is unknown
+        logger.debug(f"Could not probe dimensions with av: {e}")
 
     return None
 
@@ -647,7 +652,7 @@ def split_video_lossless(
     filename: str,
     max_bytes: int,
     source_chat: str,
-    known_duration: float = None
+    known_duration: float | None = None
 ) -> list[dict]:
     """
     Losslessly splits an oversized video into sequential parts smaller than max_bytes using FFmpeg stream copy (-c copy).
@@ -701,7 +706,7 @@ def split_video_lossless(
             cmd.extend(["-movflags", "+faststart"])
         cmd.append(output_pattern)
 
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        res = subprocess.run(cmd, capture_output=True, check=False)
         if res.returncode != 0:
             logger.error(f"[{source_chat}] FFmpeg split error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
             return []
@@ -722,7 +727,7 @@ def split_video_lossless(
             # indices are unreliable here, because the optional -movflags pair shifts them
             # and cmd[-2] addresses "+faststart" instead of the segment time.
             cmd[cmd.index("-segment_time") + 1] = str(segment_time)
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            res = subprocess.run(cmd, capture_output=True, check=False)
             if res.returncode != 0:
                 logger.error(f"[{source_chat}] FFmpeg split retry error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
             part_files = sorted([
@@ -816,7 +821,7 @@ def compress_video(
             "-movflags", "+faststart",
             output_path
         ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        res = subprocess.run(cmd, capture_output=True, check=False)
         if res.returncode != 0:
             # Audio stream copy is not supported for every codec/container pair, so fall back
             # to re-encoding the audio. Locate the argument by name: the previous positional
@@ -824,7 +829,7 @@ def compress_video(
             # command that ffmpeg rejected outright.
             audio_arg = cmd.index("-c:a")
             cmd[audio_arg:audio_arg + 2] = ["-c:a", "aac", "-b:a", "128k"]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            res = subprocess.run(cmd, capture_output=True, check=False)
             if res.returncode != 0:
                 logger.error(f"[{source_chat}] FFmpeg compression failed: {res.stderr.decode('utf-8', errors='replace')[:400]}")
                 return None
@@ -952,8 +957,8 @@ def compute_blurhash(image_bytes: bytes) -> str | None:
     nicety rather than a safety property, so an absent package or an undecodable
     image degrades to an event without one, never to dropped media."""
     try:
-        from PIL import Image
         import blurhash
+        from PIL import Image
     except ImportError:
         logger.debug("Pillow (PIL) or blurhash package is missing; sending media without a blurhash.")
         return None
@@ -1005,7 +1010,7 @@ SAFETY_STATS = {"blocked": 0, "unavailable": 0}
 DELIVERY_STATS = {"failed": 0, "partial": 0}
 
 
-async def get_image_safety_classification(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None, mime_type: str = "image/jpeg") -> tuple[bool | None, list[str]]:
+async def get_image_safety_classification(image_bytes: bytes, source_chat: str, filename: str, index_label: str | None = None, mime_type: str = "image/jpeg") -> tuple[bool | None, list[str]]:
     """
     Calls Llama Guard API for a single image/frame.
     Returns (is_safe, violated_categories) where:
@@ -1017,8 +1022,8 @@ async def get_image_safety_classification(image_bytes: bytes, source_chat: str, 
     
     try:
         import base64
-        import urllib.request
         import json
+        import urllib.request
 
         b64_data = base64.b64encode(image_bytes).decode('utf-8')
         # The data URL must describe the actual encoding: announcing PNG/WebP bytes as
@@ -1134,7 +1139,7 @@ Provide your safety assessment for ONLY THE LAST User in the above conversation:
         return None, []
 
 
-async def check_single_image_safety(image_bytes: bytes, source_chat: str, filename: str, index_label: str = None, mime_type: str = "image/jpeg") -> SafetyVerdict:
+async def check_single_image_safety(image_bytes: bytes, source_chat: str, filename: str, index_label: str | None = None, mime_type: str = "image/jpeg") -> SafetyVerdict:
     """
     Checks the safety of a single image/frame against the Llama Guard API.
     Returns SAFE if the media may pass, BLOCKED if policy rejects it, UNAVAILABLE if the
@@ -1474,8 +1479,8 @@ async def send_matrix_media_event(
     info_dict: dict,
     source_chat: str,
     channel_name: str,
-    caption_prefix: str = None,
-    blurhash_str: str = None
+    caption_prefix: str | None = None,
+    blurhash_str: str | None = None
 ) -> bool:
     """Uploads in-memory media bytes to Matrix homeserver and dispatches room messages across MATRIX_ROOM_IDS."""
     logger.info(f"[{source_chat}] Uploading to Matrix homeserver: {filename} ({len(media_bytes)} bytes)...")
@@ -1918,9 +1923,9 @@ async def master_handler(event):
 
     # Check for topic / thread details (subchannels in forums)
     topic_id = None
-    if hasattr(event.message, 'reply_to') and event.message.reply_to:
-        if hasattr(event.message.reply_to, 'forum_topic') and event.message.reply_to.forum_topic:
-            topic_id = getattr(event.message.reply_to, 'reply_to_msg_id', None)
+    if (hasattr(event.message, 'reply_to') and event.message.reply_to
+            and hasattr(event.message.reply_to, 'forum_topic') and event.message.reply_to.forum_topic):
+        topic_id = getattr(event.message.reply_to, 'reply_to_msg_id', None)
 
     # Validate channel / topic filter match
     if not is_channel_and_topic_allowed(event.chat_id, event.chat, topic_id):
