@@ -16,6 +16,7 @@ session/
 
 # Agent metadata and local scratch files
 .agents/
+AGENTS.md
 scratch/
 
 # Documentation and licensing
