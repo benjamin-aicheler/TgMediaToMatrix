@@ -67,7 +67,8 @@ This file contains development rules and architectural guidelines for AI agents 
 ## 5. Deployment, Containerization & CI/CD
 
 ### Python Base Image & Architecture Support
-- Use the stable production Python slim image (e.g. `python:3.13-slim`) to ensure pre-compiled `linux/arm64` binary wheels are readily available on PyPI. Avoid pre-release Python versions that force expensive C/Rust source compilation during builds on ARM devices.
+- The base image is pinned by its multi-arch index digest on the **3.13 line** (`python:3.13-slim@sha256:…`). Patch-level digest bumps are routine; a Python **series** jump (3.14, 3.15, …) is a deliberate change that moves the `Dockerfile` and the `ci.yml` test version together and must be backed by a real test run on the new series. Dependabot ignores series jumps on purpose (`.github/dependabot.yml`).
+- Stay on a stable production Python release so pre-compiled `linux/arm64` binary wheels are readily available on PyPI. Avoid pre-release Python versions that force expensive C/Rust source compilation during builds on ARM devices.
 - Container builds must be multi-architecture (`linux/amd64` and `linux/arm64`) to run natively on both servers and Raspberry Pi 4.
 
 ### Image Tagging & Release Workflow
@@ -77,4 +78,21 @@ This file contains development rules and architectural guidelines for AI agents 
 ### Resource Allocation
 - Always configure adequate shared memory (`shm_size: 1g`) in Docker Compose to ensure in-memory video segmenting in `/dev/shm` does not encounter "No space left on device" errors.
 
+---
 
+## 6. Dependencies & Checks
+
+### Locked requirements
+- `requirements.in` and `requirements-dev.in` hold the direct dependencies and are the only requirement files edited by hand.
+- `requirements.txt` and `requirements-dev.txt` are generated locks: every transitive package is pinned there. **Never edit them by hand** — regenerate instead:
+  ```bash
+  uv pip compile requirements.in      --python-version 3.13 -o requirements.txt
+  uv pip compile requirements-dev.in  --python-version 3.13 -o requirements-dev.txt
+  ```
+- Adding a dependency means: add it to the `.in` file, regenerate, commit the `.in` and the lock together. A new runtime dependency must have `linux/arm64` wheels, otherwise the multi-arch build starts compiling from source.
+- Dependabot maintains the pins (transitives included) and the CI actions weekly. Never hand-edit a pin to fix a Dependabot PR — regenerate the lock so the `.in` stays the source of truth.
+
+### Before proposing a change
+- `ruff check --extend-select B,LOG,BLE` must pass; that is exactly what CI runs.
+- `pytest` must pass. The suite needs no network and no ffmpeg.
+- The `docker` CI job builds the image and asserts the runtime UID is `10001`. A change that breaks the unprivileged user or the ownership of `/app/session` is a blocker.
