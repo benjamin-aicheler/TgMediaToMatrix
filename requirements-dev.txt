@@ -1,4 +1,5 @@
-# Test-only dependencies. Runtime dependencies live in requirements.txt.
-telethon
-matrix-nio
-pytest
+# Test-only dependencies. The two runtime packages are pinned to the same versions as in
+# requirements.txt; PyAV, Pillow, blurhash and imageio-ffmpeg are not needed by the suite.
+telethon==1.45.0
+matrix-nio==0.26.0
+pytest==9.1.1
