@@ -444,7 +444,8 @@ async def master_handler(event):
             if file_size > config.OVERSIZED_VIDEO_MAX_INPUT_BYTES:
                 logger.warning(
                     f"[{chat_identifier}] Video skipped: File with {round(file_size / (1024 * 1024), 2)} MB "
-                    f"exceeds maximum allowed size for processing ({config.OVERSIZED_VIDEO_MAX_INPUT_MB} MB)."
+                    f"exceeds maximum allowed size for processing ({config.OVERSIZED_VIDEO_MAX_INPUT_MB} MB). "
+                    f"{media.describe_alt_documents(event.message, config.MAX_MEDIA_SIZE_BYTES)}"
                 )
                 return
             logger.info(
@@ -489,7 +490,8 @@ async def master_handler(event):
                             if exact_size > config.OVERSIZED_VIDEO_MAX_INPUT_BYTES:
                                 logger.warning(
                                     f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) "
-                                    f"exceeds maximum allowed size for processing ({config.OVERSIZED_VIDEO_MAX_INPUT_MB} MB)"
+                                    f"exceeds maximum allowed size for processing ({config.OVERSIZED_VIDEO_MAX_INPUT_MB} MB). "
+                                    f"{media.describe_alt_documents(msg, config.MAX_MEDIA_SIZE_BYTES)}"
                                 )
                                 continue
                             logger.info(

@@ -136,6 +136,40 @@ def is_video_message(message) -> bool:
     return False
 
 
+def _document_resolution(document) -> str:
+    """Returns "WxH" from a document's video attribute, or "?" when it carries none."""
+    for attr in getattr(document, 'attributes', None) or []:
+        width = getattr(attr, 'w', None)
+        height = getattr(attr, 'h', None)
+        if width and height:
+            return f"{width}x{height}"
+    return "?"
+
+
+def describe_alt_documents(message, limit_bytes: int) -> str:
+    """Summarises the alternative video qualities Telegram carries for a document.
+
+    Large videos are stored as one primary document plus transcoded renditions in
+    ``MessageMediaDocument.alt_documents``. Telegram clients pick one of them depending on
+    the data-saver setting, which is why the app can show a smaller size than the primary
+    document the bridge reads. This only describes what is on offer; nothing is downloaded
+    and nothing is selected here.
+    """
+    media_obj = getattr(message, 'media', None)
+    alternatives = list(getattr(media_obj, 'alt_documents', None) or [])
+    if not alternatives:
+        return "Telegram lists no alternative qualities for this video."
+
+    described = []
+    for document in alternatives:
+        size_bytes = getattr(document, 'size', 0) or 0
+        size_mb = round(size_bytes / (1024 * 1024), 2)
+        verdict = "fits" if size_bytes <= limit_bytes else "above limit"
+        described.append(f"{size_mb} MB {_document_resolution(document)} ({verdict})")
+
+    return f"Telegram lists {len(alternatives)} alternative qualities: " + " | ".join(described)
+
+
 SHM_PATH = "/dev/shm"
 # Scratch space is only ever taken from the ramdisk; if it does not fit, the media is skipped.
 SHM_HEADROOM_BYTES = 64 * 1024 * 1024
