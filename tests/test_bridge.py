@@ -556,3 +556,45 @@ def test_restrict_session_permissions_tightens_an_existing_file(bridge, tmp_path
 
 def test_restrict_session_permissions_ignores_missing_file(bridge, tmp_path):
     bridge.state.restrict_session_permissions(str(tmp_path / "absent"))
+
+
+# --- Alternative video qualities ------------------------------------------------------
+
+def _alt_document(size_mb, width=None, height=None):
+    attributes = [SimpleNamespace(w=width, h=height)] if width else []
+    return SimpleNamespace(size=int(size_mb * 1024 * 1024), attributes=attributes)
+
+
+def _message_with_alternatives(alternatives):
+    return SimpleNamespace(media=SimpleNamespace(alt_documents=alternatives))
+
+
+def test_alternatives_are_described_with_size_resolution_and_fit(bridge):
+    message = _message_with_alternatives([
+        _alt_document(350, 1920, 1080),
+        _alt_document(100, 1280, 720),
+        _alt_document(60, 854, 480),
+    ])
+
+    described = bridge.describe_alt_documents(message, 80 * 1024 * 1024)
+
+    assert "3 alternative qualities" in described
+    assert "350.0 MB 1920x1080 (above limit)" in described
+    assert "100.0 MB 1280x720 (above limit)" in described
+    assert "60.0 MB 854x480 (fits)" in described
+
+
+def test_alternatives_are_reported_as_absent(bridge):
+    expected = "Telegram lists no alternative qualities for this video."
+
+    assert bridge.describe_alt_documents(_message_with_alternatives([]), 80 * 1024 * 1024) == expected
+    assert bridge.describe_alt_documents(_message_with_alternatives(None), 80 * 1024 * 1024) == expected
+    assert bridge.describe_alt_documents(SimpleNamespace(media=None), 80 * 1024 * 1024) == expected
+
+
+def test_alternative_without_video_attribute_shows_unknown_resolution(bridge):
+    described = bridge.describe_alt_documents(
+        _message_with_alternatives([_alt_document(5)]), 80 * 1024 * 1024
+    )
+
+    assert "5.0 MB ? (fits)" in described
