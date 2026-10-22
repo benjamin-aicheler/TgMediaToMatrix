@@ -98,6 +98,13 @@ try:
 
     OVERSIZED_VIDEO_FALLBACK_COMPRESS = get_env_bool("OVERSIZED_VIDEO_FALLBACK_COMPRESS", False)
 
+    # Telegram keeps lower-resolution renditions of large videos (alt_documents). With this
+    # on, the bridge picks one of them instead of skipping the video: the highest resolution
+    # that fits the upload limit is sent as-is, otherwise the highest that fits the processing
+    # ceiling is downloaded and handled by OVERSIZED_VIDEO_ACTION. The renditions are
+    # Telegram transcodes, so this trades quality for a single message.
+    PREFER_ALTERNATE_RENDITION = get_env_bool("PREFER_ALTERNATE_RENDITION", True)
+
     try:
         VIDEO_COMPRESSION_MAX_HEIGHT = int(os.environ.get("VIDEO_COMPRESSION_MAX_HEIGHT", "720"))
     except ValueError:

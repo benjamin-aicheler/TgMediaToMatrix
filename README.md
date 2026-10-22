@@ -66,6 +66,7 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `OVERSIZED_VIDEO_MAX_INPUT_MB` | Maximum file size in MB to download for oversized video processing | `250` (Default: `250`) |
 | `SHM_WAIT_TIMEOUT_SECONDS` | How long to wait for free ramdisk space before an oversized video is skipped (`0` = skip immediately) | `30` (Default: `30`) |
 | `OVERSIZED_VIDEO_FALLBACK_COMPRESS` | Fallback to compression if lossless splitting cannot find keyframes to split below limit | `false` (Default: `false`) |
+| `PREFER_ALTERNATE_RENDITION` | Use Telegram's lower-resolution renditions of oversized videos instead of skipping them (see *Alternate Renditions*) | `true` (Default: `true`) |
 | `VIDEO_COMPRESSION_MAX_HEIGHT` | Maximum vertical resolution when compressing oversized videos | `720` (Default: `720`) |
 | `VIDEO_COMPRESSION_PRESET` | FFmpeg x264 preset (`ultrafast`, `veryfast`, `fast`, etc.) | `veryfast` (Default: `veryfast`) |
 | `VIDEO_COMPRESSION_CRF` | Constant Rate Factor for video re-encoding (26–30 recommended) | `28` (Default: `28`) |
@@ -146,6 +147,16 @@ When Telegram channels post videos that exceed your configured `MAX_MEDIA_SIZE_M
 
 3. **`skip`**:
    - Legacy behavior: logs a warning and drops any video exceeding `MAX_MEDIA_SIZE_MB`.
+
+### Alternate Renditions (`PREFER_ALTERNATE_RENDITION`)
+
+Telegram stores large videos as one primary document plus lower-resolution renditions (`alt_documents`), and clients pick one depending on their data-saver setting. With `PREFER_ALTERNATE_RENDITION` (default `true`) the bridge does the same instead of skipping the video:
+
+- The **highest resolution that fits `MAX_MEDIA_SIZE_MB`** is downloaded and sent as-is — one Matrix message, no FFmpeg, no CPU load.
+- If none fits, the **highest resolution that fits `OVERSIZED_VIDEO_MAX_INPUT_MB`** is downloaded and handed to `OVERSIZED_VIDEO_ACTION` (split or compress).
+- If neither exists, the video is skipped and the log lists the renditions that were on offer.
+
+Renditions are Telegram transcodes, so the original quality is not recoverable this way — the switch trades quality for a single message. Tiny preview/scrub clips Telegram ships alongside (a few dozen KB, marked with `video_start_ts`) are filtered out and never selected.
 
 ### In-Memory RAM Disk (`/dev/shm`)
 To prevent SD card wear and ensure high-speed operations on single-board computers like the Raspberry Pi, intermediate temporary video files are processed directly in shared memory (`/dev/shm`, configured with `shm_size: 1g` in `docker-compose.yml`) and immediately purged after upload.
