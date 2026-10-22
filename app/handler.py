@@ -63,8 +63,26 @@ async def get_topic_name(client, chat_entity, topic_id):
     return f"Topic {topic_id}"
 
 
-async def process_and_upload_media(message, source_chat, channel_name):
-    """Process a single Telegram message and stream the media to Matrix"""
+def describe_rendition_choice(primary_bytes: int, rendition, mode: str | None) -> str:
+    """One log line explaining why a rendition is used instead of the primary document."""
+    primary_mb = round(primary_bytes / (1024 * 1024), 2)
+    rendition_mb = round((getattr(rendition, 'size', 0) or 0) / (1024 * 1024), 2)
+    if mode == media.DIRECT_UPLOAD:
+        consequence = "fits the upload limit, so it is sent without processing"
+    else:
+        consequence = f"still needs processing ({config.OVERSIZED_VIDEO_ACTION})"
+    return (
+        f"Primary file is {primary_mb} MB, above the {config.MAX_MEDIA_SIZE_MB} MB upload limit. "
+        f"Using Telegram's {rendition_mb} MB rendition instead: {consequence}."
+    )
+
+
+async def process_and_upload_media(message, source_chat, channel_name, download_document=None):
+    """Process a single Telegram message and stream the media to Matrix.
+
+    ``download_document`` optionally names an alternative rendition of the video to download
+    instead of the primary document (see ``media.select_alternate_rendition``).
+    """
     mime_type = message.file.mime_type if message.file else None
     filename = message.file.name if message.file else None
     
@@ -115,7 +133,10 @@ async def process_and_upload_media(message, source_chat, channel_name):
     logger.info(f"[{source_chat}] Processing media: {filename} ({mime_type}). Starting Telegram download...")
     
     try:
-        media_bytes = await message.download_media(file=bytes)
+        if download_document is not None:
+            media_bytes = await state.tg_client.download_media(download_document, file=bytes)
+        else:
+            media_bytes = await message.download_media(file=bytes)
         if not media_bytes:
             logger.error(f"[{source_chat}] Telegram download failed for: {filename}")
             if tg_media_id:
@@ -227,8 +248,11 @@ async def process_and_upload_media(message, source_chat, channel_name):
     orig_duration = None
     orig_w = None
     orig_h = None
-    if message.document and message.document.attributes:
-        for attr in message.document.attributes:
+    # Dimensions and duration must describe the file actually sent, which is the rendition
+    # when one was selected instead of the primary document.
+    metadata_document = download_document or message.document
+    if metadata_document and metadata_document.attributes:
+        for attr in metadata_document.attributes:
             if hasattr(attr, 'duration') and attr.duration is not None:
                 orig_duration = float(attr.duration)
             if hasattr(attr, 'w') and attr.w is not None and hasattr(attr, 'h') and attr.h is not None:
@@ -439,6 +463,20 @@ async def master_handler(event):
 
     file_size = (event.message.file.size if event.message.file else 0) or 0
     msg_is_video = media.is_video_message(event.message)
+
+    # Prefer a lower-resolution rendition over skipping the video outright. The rendition
+    # becomes the file the rest of the pipeline works with, so the size gates below then
+    # apply to what is actually downloaded.
+    download_document = None
+    if msg_is_video and config.PREFER_ALTERNATE_RENDITION and file_size > config.MAX_MEDIA_SIZE_BYTES:
+        rendition, mode = media.select_alternate_rendition(
+            event.message, config.MAX_MEDIA_SIZE_BYTES, config.OVERSIZED_VIDEO_MAX_INPUT_BYTES
+        )
+        if rendition is not None:
+            logger.info(f"[{chat_identifier}] {describe_rendition_choice(file_size, rendition, mode)}")
+            download_document = rendition
+            file_size = rendition.size or 0
+
     if file_size > config.MAX_MEDIA_SIZE_BYTES:
         if msg_is_video and config.OVERSIZED_VIDEO_ACTION in ("split", "compress"):
             if file_size > config.OVERSIZED_VIDEO_MAX_INPUT_BYTES:
@@ -482,9 +520,18 @@ async def master_handler(event):
 
             logger.info(f"[{chat_identifier}] Processing {len(filtered_messages)} items from album {album_id}...")
             for msg in reversed(filtered_messages):
+                album_download_document = None
                 if msg.media:
                     exact_size = (msg.file.size if msg.file else 0) or 0
                     item_is_video = media.is_video_message(msg)
+                    if item_is_video and config.PREFER_ALTERNATE_RENDITION and exact_size > config.MAX_MEDIA_SIZE_BYTES:
+                        rendition, mode = media.select_alternate_rendition(
+                            msg, config.MAX_MEDIA_SIZE_BYTES, config.OVERSIZED_VIDEO_MAX_INPUT_BYTES
+                        )
+                        if rendition is not None:
+                            logger.info(f"[{chat_identifier}] {describe_rendition_choice(exact_size, rendition, mode)}")
+                            album_download_document = rendition
+                            exact_size = rendition.size or 0
                     if exact_size > config.MAX_MEDIA_SIZE_BYTES:
                         if item_is_video and config.OVERSIZED_VIDEO_ACTION in ("split", "compress"):
                             if exact_size > config.OVERSIZED_VIDEO_MAX_INPUT_BYTES:
@@ -502,9 +549,9 @@ async def master_handler(event):
                             logger.warning(f"[{chat_identifier}] Item in album skipped: Actual size ({round(exact_size / (1024 * 1024), 2)} MB) exceeds limit ({config.MAX_MEDIA_SIZE_MB} MB)")
                             continue
 
-                await process_and_upload_media(msg, chat_identifier, channel_display)
+                await process_and_upload_media(msg, chat_identifier, channel_display, album_download_document)
         except Exception as e:  # noqa: BLE001 - one broken album must not kill the update loop
             logger.error(f"[{chat_identifier}] Error loading album {album_id}: {e}")
     else:
-        await process_and_upload_media(event.message, chat_identifier, channel_display)
+        await process_and_upload_media(event.message, chat_identifier, channel_display, download_document)
 

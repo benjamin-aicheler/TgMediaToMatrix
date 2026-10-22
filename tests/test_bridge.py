@@ -618,6 +618,56 @@ def test_only_preview_clips_is_reported_separately(bridge):
     assert "none of them a usable rendition" in described
 
 
+def test_selector_prefers_highest_resolution_that_fits_the_upload_limit(bridge):
+    message = _message_with_alternatives([
+        _rendition(150.33, 1280, 720),
+        _rendition(111.58, 1280, 720),
+        _rendition(73.62, 852, 480),
+        _rendition(57.89, 852, 480),
+    ])
+
+    document, mode = bridge.select_alternate_rendition(message, UPLOAD_LIMIT, PROCESSING_LIMIT)
+
+    assert mode == bridge.DIRECT_UPLOAD
+    assert document.size == int(73.62 * 1024 * 1024)
+
+
+def test_selector_falls_back_to_the_best_processing_candidate(bridge):
+    message = _message_with_alternatives([
+        _rendition(250, 1920, 1080),
+        _rendition(150.33, 1280, 720),
+        _rendition(111.58, 1280, 720),
+    ])
+
+    document, mode = bridge.select_alternate_rendition(message, UPLOAD_LIMIT, PROCESSING_LIMIT)
+
+    assert mode == bridge.NEEDS_PROCESSING
+    assert document.size == int(150.33 * 1024 * 1024)
+
+
+def test_selector_returns_nothing_when_every_rendition_is_too_large(bridge):
+    message = _message_with_alternatives([_rendition(863.43, 1920, 1080)])
+
+    assert bridge.select_alternate_rendition(message, UPLOAD_LIMIT, PROCESSING_LIMIT) == (None, None)
+
+
+def test_selector_never_picks_a_preview_clip(bridge):
+    message = _message_with_alternatives([_rendition(0.02, 144, 80, duration=0.0)])
+
+    assert bridge.select_alternate_rendition(message, UPLOAD_LIMIT, PROCESSING_LIMIT) == (None, None)
+
+
+def test_rendition_choice_log_names_primary_size_and_rendition(bridge):
+    line = bridge.describe_rendition_choice(
+        863 * 1024 * 1024, _rendition(73.62, 852, 480), bridge.DIRECT_UPLOAD
+    )
+
+    assert "863.0 MB" in line
+    assert "73.62 MB" in line
+    assert f"{bridge.MAX_MEDIA_SIZE_MB} MB upload limit" in line
+    assert "without processing" in line
+
+
 def test_alternatives_are_reported_as_absent(bridge):
     expected = "Telegram lists no alternative qualities for this video."
 

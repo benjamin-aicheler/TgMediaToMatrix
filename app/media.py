@@ -163,6 +163,43 @@ def is_rendition_document(document) -> bool:
     return (getattr(attr, 'duration', 0) or 0) > 0
 
 
+DIRECT_UPLOAD = "direct"
+NEEDS_PROCESSING = "processing"
+
+
+def select_alternate_rendition(message, upload_limit_bytes: int, processing_limit_bytes: int):
+    """Picks the best alternative rendition of an oversized video.
+
+    Returns ``(document, mode)`` with ``mode`` being ``DIRECT_UPLOAD`` when the rendition fits
+    the upload limit as-is, ``NEEDS_PROCESSING`` when it is small enough to be downloaded and
+    handled by the configured oversized action, or ``(None, None)`` when nothing is usable.
+    "Best" means highest resolution first, then largest file, so a 720p rendition wins over
+    480p and, within one resolution, the higher bitrate wins.
+    """
+    media_obj = getattr(message, 'media', None)
+    alternatives = [
+        document
+        for document in (getattr(media_obj, 'alt_documents', None) or [])
+        if is_rendition_document(document)
+    ]
+    if not alternatives:
+        return None, None
+
+    def ranking(document):
+        attr = _video_attribute(document)
+        area = ((attr.w or 0) * (attr.h or 0)) if attr is not None else 0
+        return area, (getattr(document, 'size', 0) or 0)
+
+    ordered = sorted(alternatives, key=ranking, reverse=True)
+    for document in ordered:
+        if (getattr(document, 'size', 0) or 0) <= upload_limit_bytes:
+            return document, DIRECT_UPLOAD
+    for document in ordered:
+        if (getattr(document, 'size', 0) or 0) <= processing_limit_bytes:
+            return document, NEEDS_PROCESSING
+    return None, None
+
+
 def describe_alt_documents(message, upload_limit_bytes: int, processing_limit_bytes: int) -> str:
     """Summarises the alternative video qualities Telegram carries for a document.
 
