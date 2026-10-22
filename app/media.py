@@ -136,17 +136,34 @@ def is_video_message(message) -> bool:
     return False
 
 
-def _document_resolution(document) -> str:
-    """Returns "WxH" from a document's video attribute, or "?" when it carries none."""
+def _video_attribute(document):
+    """Returns the document's DocumentAttributeVideo, or None when it carries none."""
     for attr in getattr(document, 'attributes', None) or []:
-        width = getattr(attr, 'w', None)
-        height = getattr(attr, 'h', None)
-        if width and height:
-            return f"{width}x{height}"
-    return "?"
+        if hasattr(attr, 'w') and hasattr(attr, 'h') and hasattr(attr, 'duration'):
+            return attr
+    return None
 
 
-def describe_alt_documents(message, limit_bytes: int) -> str:
+# Telegram ships tiny preview/scrub clips next to the real renditions: a few dozen KB,
+# marked with a video_start_ts, usually 144x80 or smaller. They would be useless as a
+# substitute video, so anything below these bounds is not treated as a rendition.
+MIN_RENDITION_WIDTH = 240
+MIN_RENDITION_HEIGHT = 120
+
+
+def is_rendition_document(document) -> bool:
+    """True for a real transcoded rendition, False for a preview/scrub clip or a non-video."""
+    attr = _video_attribute(document)
+    if attr is None:
+        return False
+    if getattr(attr, 'video_start_ts', None):
+        return False
+    if (attr.w or 0) < MIN_RENDITION_WIDTH or (attr.h or 0) < MIN_RENDITION_HEIGHT:
+        return False
+    return (getattr(attr, 'duration', 0) or 0) > 0
+
+
+def describe_alt_documents(message, upload_limit_bytes: int, processing_limit_bytes: int) -> str:
     """Summarises the alternative video qualities Telegram carries for a document.
 
     Large videos are stored as one primary document plus transcoded renditions in
@@ -154,20 +171,51 @@ def describe_alt_documents(message, limit_bytes: int) -> str:
     the data-saver setting, which is why the app can show a smaller size than the primary
     document the bridge reads. This only describes what is on offer; nothing is downloaded
     and nothing is selected here.
+
+    Renditions are grouped by resolution and labelled against both limits, because they
+    answer different questions: what could be uploaded as-is, and what is small enough to
+    be processed at all.
     """
     media_obj = getattr(message, 'media', None)
     alternatives = list(getattr(media_obj, 'alt_documents', None) or [])
     if not alternatives:
         return "Telegram lists no alternative qualities for this video."
 
-    described = []
-    for document in alternatives:
-        size_bytes = getattr(document, 'size', 0) or 0
-        size_mb = round(size_bytes / (1024 * 1024), 2)
-        verdict = "fits" if size_bytes <= limit_bytes else "above limit"
-        described.append(f"{size_mb} MB {_document_resolution(document)} ({verdict})")
+    renditions = [document for document in alternatives if is_rendition_document(document)]
+    ignored = len(alternatives) - len(renditions)
+    if not renditions:
+        return (
+            f"Telegram lists {len(alternatives)} alternative document(s), "
+            f"none of them a usable rendition — all preview clips."
+        )
 
-    return f"Telegram lists {len(alternatives)} alternative qualities: " + " | ".join(described)
+    grouped: dict[tuple[int, int], list[int]] = {}
+    for document in renditions:
+        attr = _video_attribute(document)
+        if attr is None:  # is_rendition_document() already guarantees one, kept for the type checker
+            continue
+        grouped.setdefault((attr.w, attr.h), []).append(getattr(document, 'size', 0) or 0)
+
+    def as_mb(value: int) -> str:
+        return f"{round(value / (1024 * 1024), 2)} MB"
+
+    described = []
+    for (width, height), sizes in sorted(grouped.items(), key=lambda item: item[0][0] * item[0][1], reverse=True):
+        sizes.sort(reverse=True)
+        upload_fits = [size for size in sizes if size <= upload_limit_bytes]
+        processing_fits = [size for size in sizes if size <= processing_limit_bytes]
+        if upload_fits:
+            note = f"largest fitting the upload limit: {as_mb(upload_fits[0])}"
+        elif processing_fits:
+            note = "above the upload limit, small enough for processing"
+        else:
+            note = "above the processing limit as well"
+        described.append(f"{width}x{height}: {', '.join(as_mb(size) for size in sizes)} ({note})")
+
+    summary = f"Telegram lists {len(renditions)} usable rendition(s) in {len(grouped)} resolution(s)"
+    if ignored:
+        summary += f", {ignored} preview clip(s) ignored"
+    return summary + ": " + " | ".join(described)
 
 
 SHM_PATH = "/dev/shm"
