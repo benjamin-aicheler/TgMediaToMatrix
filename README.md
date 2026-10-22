@@ -142,7 +142,7 @@ When Telegram channels post videos that exceed your configured `MAX_MEDIA_SIZE_M
    - **Sub-Second Performance**: Takes only ~0.1s – 0.4s to execute, even on low-power ARM CPUs like the **Raspberry Pi 4 Model B**.
    - **Zero Quality Loss**: The video and audio bitstreams remain 100% untouched and identical to the original upload.
    - **Zero CPU Heat**: CPU usage remains near 0%, avoiding thermal throttling.
-   - **Matrix Presentation**: Each part is posted into the Matrix room with updated captions and individual metadata (e.g. `Part 1/2 • 1920x1080 58.4 MB`), with thumbnails and Blurhashes attached.
+   - **Matrix Presentation**: Each part is posted into the Matrix room with updated captions and individual metadata (e.g. `Part 1/2 • 1920x1080 58.4 MB`). Every part carries its **own thumbnail**: one frame is sampled in-memory from a little past the middle of that part (PyAV, no re-encode) and uploaded separately, and its Blurhash is computed from that frame — roughly 0.2–0.9s of extra decode work and one small upload per part on a Pi-class CPU. The primary document's Telegram thumbnail remains the fallback when a frame cannot be extracted or the extra upload is rejected.
 
 2. **`compress`**:
    - Re-encodes oversized videos down to a maximum resolution (`VIDEO_COMPRESSION_MAX_HEIGHT`, default `720p`) using `libx264` with fast presets (`VIDEO_COMPRESSION_PRESET`, default `veryfast`) and audio stream copying (`-c:a copy`).

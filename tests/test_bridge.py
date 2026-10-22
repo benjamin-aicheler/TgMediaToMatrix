@@ -5,6 +5,7 @@ covered by hand on the real container instead.
 """
 
 import asyncio
+import importlib.util
 import logging
 import shutil
 import subprocess
@@ -674,3 +675,174 @@ def test_alternatives_are_reported_as_absent(bridge):
     assert bridge.describe_alt_documents(_message_with_alternatives([]), UPLOAD_LIMIT, PROCESSING_LIMIT) == expected
     assert bridge.describe_alt_documents(_message_with_alternatives(None), UPLOAD_LIMIT, PROCESSING_LIMIT) == expected
     assert bridge.describe_alt_documents(SimpleNamespace(media=None), UPLOAD_LIMIT, PROCESSING_LIMIT) == expected
+
+
+# --- Per-part thumbnails -------------------------------------------------------------
+
+
+class RecordingMatrixClient:
+    """Records uploads and room events so individual thumbnails can be told apart."""
+
+    def __init__(self):
+        self.uploaded_filenames = []
+        self.events = []
+
+    async def upload(self, stream, content_type=None, filename=None, filesize=None):
+        self.uploaded_filenames.append(filename)
+        return nio.UploadResponse(content_uri=f"mxc://test.invalid/{filename}"), {}
+
+    async def room_send(self, room_id, message_type, content=None):
+        self.events.append(content)
+        return nio.RoomSendResponse(event_id=f"${len(self.events)}", room_id=room_id)
+
+
+class FakeVideoMessage:
+    def __init__(self, media_bytes, thumb_bytes=b"tg-thumb"):
+        self.id = 7
+        self.file = SimpleNamespace(mime_type="video/mp4", name="clip.mp4", size=len(media_bytes))
+        self.photo = None
+        self.document = None
+        self._media_bytes = media_bytes
+        self._thumb_bytes = thumb_bytes
+
+    async def download_media(self, file=None, thumb=None):
+        return self._thumb_bytes if thumb == -1 else self._media_bytes
+
+
+def split_part(index, total, thumbnail, w=320, h=240):
+    return {
+        "bytes": f"part-{index}".encode(),
+        "filename": f"clip_part{index}_of_{total}.mp4",
+        "part_index": index,
+        "total_parts": total,
+        "duration_ms": 5000,
+        "w": w,
+        "h": h,
+        "size": 500,
+        "thumbnail": thumbnail,
+        "thumbnail_w": w if thumbnail else None,
+        "thumbnail_h": h if thumbnail else None,
+    }
+
+
+def prepare_split(bridge, monkeypatch, parts):
+    """Wires a split run: one room, a small upload limit and pre-split parts."""
+    client = RecordingMatrixClient()
+    monkeypatch.setattr(bridge, "matrix_client", client)
+    monkeypatch.setattr(bridge, "MAX_MEDIA_SIZE_BYTES", 1000)
+    monkeypatch.setattr(bridge, "LLAMAGUARD_API_URL", "")
+    monkeypatch.setattr(bridge, "split_video_lossless", lambda *args, **kwargs: parts)
+    monkeypatch.setattr(bridge, "probe_image", lambda data: (640, 480, "image/jpeg"))
+    monkeypatch.setattr(bridge, "compute_blurhash", lambda data: "bh-" + data.decode())
+
+    async def enough_ramdisk(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(bridge, "reserve_shm_space", enough_ramdisk)
+    return client
+
+
+def test_split_parts_get_their_own_thumbnail_and_blurhash(bridge, monkeypatch):
+    parts = [split_part(1, 3, b"frame-1"), split_part(2, 3, b"frame-2"), split_part(3, 3, None)]
+    client = prepare_split(bridge, monkeypatch, parts)
+
+    run(bridge.process_and_upload_media(FakeVideoMessage(b"x" * 2000), "chat", "chan"))
+
+    assert len(client.events) == 3
+    thumbnails = [event["info"]["thumbnail_url"] for event in client.events]
+    assert thumbnails == [
+        "mxc://test.invalid/thumbnail_part1.jpg",
+        "mxc://test.invalid/thumbnail_part2.jpg",
+        "mxc://test.invalid/thumbnail.jpeg",
+    ]
+    # The part without an extractable frame keeps the primary document's Telegram thumbnail.
+    assert client.events[2]["info"]["thumbnail_info"] == {
+        "mimetype": "image/jpeg",
+        "size": len(b"tg-thumb"),
+        "w": 640,
+        "h": 480,
+    }
+    assert client.events[0]["info"]["thumbnail_info"] == {
+        "mimetype": "image/jpeg",
+        "size": len(b"frame-1"),
+        "w": 320,
+        "h": 240,
+    }
+    assert [event["info"]["xyz.amorgan.blurhash"] for event in client.events] == [
+        "bh-frame-1",
+        "bh-frame-2",
+        "bh-tg-thumb",
+    ]
+
+
+def test_rejected_part_thumbnail_falls_back_to_the_shared_one(bridge, monkeypatch):
+    class RejectingPartThumbnails(RecordingMatrixClient):
+        async def upload(self, stream, content_type=None, filename=None, filesize=None):
+            if filename and filename.startswith("thumbnail_part"):
+                return object(), {}
+            return await super().upload(stream, content_type, filename, filesize)
+
+    parts = [split_part(1, 2, b"frame-1"), split_part(2, 2, b"frame-2")]
+    client = prepare_split(bridge, monkeypatch, parts)
+    monkeypatch.setattr(client, "upload", RejectingPartThumbnails().upload)
+
+    # Distinct bytes: the content-hash deduplicator is module state and would otherwise
+    # suppress this video as a repost of the one a previous test uploaded.
+    run(bridge.process_and_upload_media(FakeVideoMessage(b"y" * 2000), "chat", "chan"))
+
+    assert [event["info"]["thumbnail_url"] for event in client.events] == [
+        "mxc://test.invalid/thumbnail.jpeg",
+        "mxc://test.invalid/thumbnail.jpeg",
+    ]
+    assert [event["info"]["xyz.amorgan.blurhash"] for event in client.events] == ["bh-tg-thumb", "bh-tg-thumb"]
+
+
+def test_upload_thumbnail_reports_uri_and_info(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "matrix_client", RecordingMatrixClient())
+
+    result = run(bridge.upload_thumbnail(b"jpeg", "image/jpeg", 320, 240, "thumb.jpg", "chat"))
+
+    assert result == (
+        "mxc://test.invalid/thumb.jpg",
+        {"mimetype": "image/jpeg", "size": 4, "w": 320, "h": 240},
+    )
+
+
+def test_upload_thumbnail_returns_none_when_the_homeserver_rejects_it(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "matrix_client", FakeMatrixClient(upload_ok=False))
+
+    assert run(bridge.upload_thumbnail(b"jpeg", "image/jpeg", 1, 1, "thumb.jpg", "chat")) is None
+
+
+def test_video_thumbnail_ignores_undecodable_bytes(bridge):
+    assert bridge.extract_video_thumbnail(b"not a video") is None
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or importlib.util.find_spec("av") is None or importlib.util.find_spec("PIL") is None,
+    reason="needs ffmpeg plus PyAV and Pillow",
+)
+def test_video_thumbnail_is_a_small_jpeg_of_the_sampled_frame(bridge, tmp_path):
+    clip = tmp_path / "clip.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-f", "lavfi",
+            "-i", "testsrc=duration=4:size=1280x720:rate=10",
+            "-pix_fmt", "yuv420p", "-c:v", "libx264", str(clip), "-y",
+        ],
+        check=True,
+        timeout=60,
+    )
+    video_bytes = clip.read_bytes()
+
+    start = bridge.extract_video_thumbnail(video_bytes, position=0.1)
+    middle = bridge.extract_video_thumbnail(video_bytes, position=0.9)
+
+    assert start is not None and middle is not None
+    jpeg_bytes, width, height, mime = middle
+    assert mime == "image/jpeg"
+    assert jpeg_bytes.startswith(b"\xff\xd8")
+    assert width == 800 and height == 450
+    assert (width, height) == (start[1], start[2])
+    # The testsrc pattern changes over time, so two positions must not yield the same frame.
+    assert start[0] != middle[0]

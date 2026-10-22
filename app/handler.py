@@ -16,6 +16,45 @@ from telethon import events
 logger = logging.getLogger("tgmabr")
 
 
+async def upload_thumbnail(
+    thumb_bytes: bytes,
+    mime_type: str | None,
+    width: int | None,
+    height: int | None,
+    filename: str,
+    source_chat: str
+) -> tuple[str, dict] | None:
+    """Uploads thumbnail bytes and returns (mxc_uri, info_dict), or None if it was rejected.
+
+    Thumbnails are optional in every call site: a failure here degrades the preview, never
+    the media event itself.
+    """
+    if not thumb_bytes or not mime_type:
+        return None
+
+    try:
+        resp, _ = await state.matrix_client.upload(
+            io.BytesIO(thumb_bytes),
+            content_type=mime_type,
+            filename=filename,
+            filesize=len(thumb_bytes)
+        )
+    except Exception as e:  # noqa: BLE001 - thumbnails are optional, the media is sent either way
+        logger.debug(f"[{source_chat}] Thumbnail upload for {filename} failed: {e}")
+        return None
+
+    if not isinstance(resp, UploadResponse):
+        logger.debug(f"[{source_chat}] Matrix rejected the thumbnail upload for {filename}: {resp}")
+        return None
+
+    return resp.content_uri, {
+        "mimetype": mime_type,
+        "size": len(thumb_bytes),
+        "w": width,
+        "h": height
+    }
+
+
 def is_channel_and_topic_allowed(chat_id, chat_entity, topic_id=None):
     """Check if a given channel ID and topic ID match the configured filtering rules."""
     chat_username = getattr(chat_entity, 'username', None) if chat_entity else None
@@ -220,20 +259,11 @@ async def process_and_upload_media(message, source_chat, channel_name, download_
             if thumb_bytes:
                 blurhash_bytes = thumb_bytes
                 thumb_ext = thumb_mime.split('/', 1)[1]
-                thumb_resp, _ = await state.matrix_client.upload(
-                    io.BytesIO(thumb_bytes),
-                    content_type=thumb_mime,
-                    filename=f"thumbnail.{thumb_ext}",
-                    filesize=len(thumb_bytes)
+                uploaded = await upload_thumbnail(
+                    thumb_bytes, thumb_mime, thumb_w, thumb_h, f"thumbnail.{thumb_ext}", source_chat
                 )
-                if isinstance(thumb_resp, UploadResponse):
-                    thumb_url = thumb_resp.content_uri
-                    thumb_info = {
-                        "mimetype": thumb_mime,
-                        "size": len(thumb_bytes),
-                        "w": thumb_w,
-                        "h": thumb_h
-                    }
+                if uploaded:
+                    thumb_url, thumb_info = uploaded
         except Exception as thumb_err:  # noqa: BLE001 - thumbnails are optional, the media is sent either way
             logger.debug(f"[{source_chat}] Thumbnail skipped: {thumb_err}")
 
@@ -308,9 +338,29 @@ async def process_and_upload_media(message, source_chat, channel_name, download_
                     elif orig_duration:
                         part_info["duration"] = int((orig_duration / len(parts)) * 1000)
 
-                    if thumb_url:
-                        part_info["thumbnail_url"] = thumb_url
-                        part_info["thumbnail_info"] = thumb_info
+                    # Every part previews its own frame; the primary document's thumbnail
+                    # (shown at the head of the whole video) stays the fallback when the
+                    # per-part extraction or upload did not work out.
+                    part_thumb_url = thumb_url
+                    part_thumb_info = thumb_info
+                    part_blurhash = blurhash_str
+                    part_thumb = p.get("thumbnail")
+                    if part_thumb:
+                        uploaded = await upload_thumbnail(
+                            part_thumb,
+                            "image/jpeg",
+                            p.get("thumbnail_w"),
+                            p.get("thumbnail_h"),
+                            f"thumbnail_part{p['part_index']}.jpg",
+                            source_chat
+                        )
+                        if uploaded:
+                            part_thumb_url, part_thumb_info = uploaded
+                            part_blurhash = await asyncio.to_thread(media.compute_blurhash, part_thumb) or blurhash_str
+
+                    if part_thumb_url:
+                        part_info["thumbnail_url"] = part_thumb_url
+                        part_info["thumbnail_info"] = part_thumb_info
 
                     sent = await matrix_io.send_matrix_media_event(
                         media_bytes=p["bytes"],
@@ -321,7 +371,7 @@ async def process_and_upload_media(message, source_chat, channel_name, download_
                         source_chat=source_chat,
                         channel_name=channel_name,
                         caption_prefix=f"Part {p['part_index']}/{p['total_parts']}",
-                        blurhash_str=blurhash_str
+                        blurhash_str=part_blurhash
                     )
                     if not sent:
                         upload_failed = True

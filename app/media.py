@@ -524,6 +524,9 @@ def split_video_lossless(
 
             part_dur = probe_video_duration(ppath, ffmpeg_bin)
             part_dims = probe_video_dimensions(ppath, ffmpeg_bin)
+            # Each part previews itself: the primary document's thumbnail shows the start
+            # of the whole video and would look identical on every part.
+            part_thumb = extract_video_thumbnail(p_bytes)
 
             results.append({
                 "bytes": p_bytes,
@@ -533,7 +536,10 @@ def split_video_lossless(
                 "duration_ms": int(part_dur * 1000) if part_dur else None,
                 "w": part_dims[0] if part_dims else None,
                 "h": part_dims[1] if part_dims else None,
-                "size": len(p_bytes)
+                "size": len(p_bytes),
+                "thumbnail": part_thumb[0] if part_thumb else None,
+                "thumbnail_w": part_thumb[1] if part_thumb else None,
+                "thumbnail_h": part_thumb[2] if part_thumb else None
             })
 
         logger.info(
@@ -642,6 +648,17 @@ BLURHASH_COMPONENTS_Y = 3
 # full-resolution photo at tens of milliseconds instead of tens of seconds.
 BLURHASH_MAX_EDGE = 64
 
+# Matrix clients treat 800x800 as the upper bound for inline thumbnails; anything larger
+# is downscaled by every client anyway, so splitting the bytes would only waste storage.
+THUMBNAIL_MAX_EDGE = 800
+THUMBNAIL_JPEG_QUALITY = 85
+
+# A seek only lands on the preceding keyframe, so the requested position is reached by
+# decoding forward from there. This bounds that work when a container cannot be seeked at
+# all (no index): at that point the frame closest to the target so far is good enough for
+# a preview, rather than decoding an entire multi-minute part.
+THUMBNAIL_MAX_DECODE_FRAMES = 600
+
 
 def probe_image(image_bytes: bytes) -> tuple[int, int, str] | None:
     """Reads width, height and mime type straight from the encoded bytes.
@@ -717,6 +734,87 @@ def generate_image_thumbnail(image_bytes: bytes, max_size: int = 800) -> tuple[b
     except (OSError, ValueError) as e:
         logger.debug(f"Could not generate image thumbnail: {e}")
         return None
+
+
+def extract_video_thumbnail(
+    video_bytes: bytes,
+    position: float = 0.5,
+    max_size: int = THUMBNAIL_MAX_EDGE
+) -> tuple[bytes, int, int, str] | None:
+    """Extracts one representative frame from a video as a JPEG thumbnail, in-memory.
+
+    Used to give every lossless split part its own preview instead of repeating the
+    primary document's thumbnail on all of them. ``position`` is the fraction of the
+    clip to sample: the default mid-point avoids the fade-in that often makes the very
+    first keyframe a black frame. Returns (jpeg_bytes, width, height, mime_type) or
+    None; the caller keeps the Telegram thumbnail as a fallback.
+    """
+    try:
+        import av
+        from PIL import Image
+    except ImportError:
+        logger.debug("PyAV (av) or Pillow (PIL) is missing; skipping the per-part video thumbnail.")
+        return None
+
+    container = None
+    try:
+        container = av.open(io.BytesIO(video_bytes))
+        stream = container.streams.video[0]
+
+        duration = 0.0
+        if stream.duration and stream.time_base:
+            try:
+                duration = float(stream.duration * stream.time_base)
+            except (TypeError, ValueError):
+                duration = 0.0
+        if duration <= 0 and container.duration:
+            # Container duration is reported in AV_TIME_BASE units (microseconds).
+            duration = float(container.duration / 1_000_000)
+
+        target_seconds = max(0.0, min(position, 0.99)) * duration
+        if target_seconds > 0 and stream.time_base:
+            try:
+                # A seek stops at the preceding keyframe; the loop below closes the
+                # remaining distance. Formats without an index (or parts written without
+                # faststart) fall through to decoding from the start instead.
+                container.seek(
+                    int(target_seconds / float(stream.time_base)),
+                    stream=stream,
+                    backward=True
+                )
+            except Exception as e:  # noqa: BLE001 - an unseekable container is not an error, just a slower path
+                logger.debug(f"Could not seek into the video for a thumbnail: {e}")
+
+        frame = None
+        for decoded, candidate in enumerate(container.decode(video=0), start=1):
+            frame = candidate
+            # frame.time is None when the container carries no timestamps; the first
+            # decodable frame is the best available answer then.
+            if frame.time is None or frame.time >= target_seconds:
+                break
+            if decoded >= THUMBNAIL_MAX_DECODE_FRAMES:
+                break
+        if frame is None:
+            return None
+
+        image = frame.to_image().convert("RGB")
+        image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        width, height = image.size
+        if width < 1 or height < 1:
+            return None
+
+        out = io.BytesIO()
+        image.save(out, format="JPEG", quality=THUMBNAIL_JPEG_QUALITY, optimize=True)
+        return out.getvalue(), int(width), int(height), "image/jpeg"
+    except Exception as e:  # noqa: BLE001 - a thumbnail is optional; any decoder failure falls back
+        logger.debug(f"Could not extract a video thumbnail: {e}")
+        return None
+    finally:
+        if container is not None:
+            try:
+                container.close()
+            except Exception as e:  # noqa: BLE001 - closing a broken container may raise anything
+                logger.debug(f"Could not close the video container: {e}")
 
 
 def compute_blurhash(image_bytes: bytes) -> str | None:
