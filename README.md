@@ -31,7 +31,8 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
   - When a video exceeds `MAX_MEDIA_SIZE_MB`, the bridge can automatically process it instead of dropping it:
     - **Lossless Stream Splitting (`split`, default)**: Slices the video at keyframes using FFmpeg stream copy (`-c copy`) in RAM (`/dev/shm`). Operates in sub-seconds with **~0% CPU load and 100% original quality**, making it perfect for low-power devices like the **Raspberry Pi 4**.
     - **Fast Low-Resource Compression (`compress`)**: Re-encodes videos down to 720p with `libx264` fast presets and audio stream passthrough.
-    - **Ceiling Protection**: Ignores videos larger than `OVERSIZED_VIDEO_MAX_INPUT_MB` (e.g. 250 MB) before downloading to prevent OOM.
+    - **Ceiling Protection**: Rejects videos larger than `OVERSIZED_VIDEO_MAX_INPUT_MB` (e.g. 250 MB) before downloading to prevent OOM — unless one of Telegram's lower-resolution renditions fits (see *Alternate Renditions*).
+- **Alternate Renditions for Oversized Videos**: Instead of dropping a video that exceeds `MAX_MEDIA_SIZE_MB`, the bridge uses one of Telegram's lower-resolution renditions (`alt_documents`): the highest resolution that fits the upload limit is sent as a single message without FFmpeg, otherwise the highest that fits the processing ceiling is split or compressed. Controlled by `PREFER_ALTERNATE_RENDITION` (default `true`).
 - **Dynamic Interactive Chat Commands**: When `ADMIN_MATRIX_USER_ID` is set, the authorized admin user can send `!tmmb` commands in Matrix to query status or dynamically toggle image and video bridging on the fly.
 
 ---
@@ -121,6 +122,8 @@ To prevent duplicate media messages when identical content is posted across mult
    - If the Telegram media ID is novel (such as when an image or video is manually uploaded separately to different channels instead of forwarded), the media bytes are downloaded.
    - Immediately after download, the bridge computes an exact `SHA-256` content hash of the raw bytes in a background thread.
    - If the content hash was already forwarded within the deduplication window, the media is discarded **before** running Llama Guard safety moderation, thumbnail generation, or Matrix upload.
+   - The hash covers the bytes that are actually forwarded. When the bridge picks a lower-resolution rendition of an oversized video (see *Alternate Renditions*), that rendition is what gets hashed — so the suppression still matches what landed in Matrix.
+   - This tier is an exact match, which is also its limit: two separate uploads of the same content are re-encoded independently by Telegram, produce different bytes, and are therefore **not** recognised as duplicates. Tier 1 catches those only when the repost keeps the original document ID.
 3. **Album Integrity**:
    - For Telegram albums (grouped media), deduplication runs per item. If an album contains a mix of previously seen media and new media, the novel items are forwarded cleanly while duplicates are suppressed.
 4. **Bounded Memory**:
@@ -164,7 +167,7 @@ To prevent SD card wear and ensure high-speed operations on single-board compute
 The bridge never falls back to a disk directory. Before a split or compression run it reserves twice the video size plus 64 MB of headroom on the ramdisk, because the input file and the produced parts coexist there; if that does not fit, it waits up to `SHM_WAIT_TIMEOUT_SECONDS` (default `30`) for space to free up and otherwise skips the video with a log line, so a repost can be picked up later.
 
 ### Pre-Download Ceiling Protection
-To prevent downloading massive multi-gigabyte files that could exhaust RAM, the bridge checks the video's size from Telegram metadata *before* starting the download. Any video exceeding `OVERSIZED_VIDEO_MAX_INPUT_MB` (default `250` MB) is skipped immediately.
+To prevent downloading massive multi-gigabyte files that could exhaust RAM, the bridge checks the video's size from Telegram metadata *before* starting the download. A video exceeding `OVERSIZED_VIDEO_MAX_INPUT_MB` (default `250` MB) is skipped — but only after checking whether a rendition within the ceiling exists (see *Alternate Renditions*). With `PREFER_ALTERNATE_RENDITION` disabled, the size check alone decides, as before.
 
 ---
 

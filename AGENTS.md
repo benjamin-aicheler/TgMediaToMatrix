@@ -59,6 +59,11 @@ This file contains development rules and architectural guidelines for AI agents 
 - When handling oversized videos that exceed Matrix homeserver limits, prioritize lossless stream-copy splitting (`-c copy`) over re-encoding to minimize CPU and RAM consumption on low-power devices like Raspberry Pi 4.
 - Because FFmpeg requires seekable filesystem paths to write MP4 `moov` index headers and multi-file segments, video splitting operations must use `/dev/shm` (Linux tmpfs RAM disk) rather than physical disk or microSD storage. Ensure temporary chunk directories are deleted immediately in `finally` blocks.
 
+### Alternate Renditions for Oversized Videos
+- Before a video is skipped for exceeding `OVERSIZED_VIDEO_MAX_INPUT_BYTES`, prefer one of Telegram's renditions from `MessageMediaDocument.alt_documents` when `PREFER_ALTERNATE_RENDITION` is enabled: the highest resolution that fits `MAX_MEDIA_SIZE_BYTES` is sent as-is, otherwise the highest that fits the ceiling goes through `OVERSIZED_VIDEO_ACTION`. Selection lives in `media.select_alternate_rendition()`; never select a document that `media.is_rendition_document()` rejects — those are preview/scrub clips of a few dozen KB.
+- A rendition is a Telegram transcode, not the original upload. Never describe it as lossless, and keep the `-c copy` and RAM-disk rules for the processing path.
+- The pre-download deduplication key must always come from the **primary** document (`media.get_telegram_media_id()` reads `message.document`). Deriving it from the selected rendition would break duplicate suppression silently: the same repost would produce a different key depending on which rendition was chosen.
+
 ### Dependency Isolation
 - Isolate the imports of optional binary/C-bound packages (like `av` and `PIL`) inside the functions that use them, catching `ImportError` gracefully, to keep the main service core runnable even if those specific packages are not present.
 
