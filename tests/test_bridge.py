@@ -560,41 +560,67 @@ def test_restrict_session_permissions_ignores_missing_file(bridge, tmp_path):
 
 # --- Alternative video qualities ------------------------------------------------------
 
-def _alt_document(size_mb, width=None, height=None):
-    attributes = [SimpleNamespace(w=width, h=height)] if width else []
-    return SimpleNamespace(size=int(size_mb * 1024 * 1024), attributes=attributes)
+def _rendition(size_mb, width, height, duration=60.0, video_start_ts=None):
+    attr = SimpleNamespace(w=width, h=height, duration=duration, video_start_ts=video_start_ts)
+    return SimpleNamespace(size=int(size_mb * 1024 * 1024), attributes=[attr])
 
 
 def _message_with_alternatives(alternatives):
     return SimpleNamespace(media=SimpleNamespace(alt_documents=alternatives))
 
 
-def test_alternatives_are_described_with_size_resolution_and_fit(bridge):
+UPLOAD_LIMIT = 80 * 1024 * 1024
+PROCESSING_LIMIT = 200 * 1024 * 1024
+
+
+def test_renditions_are_grouped_by_resolution_and_labelled_against_both_limits(bridge):
+    # Mirrors a real log line: two 720p renditions, two 480p renditions and the preview
+    # clips Telegram attaches to each of them.
     message = _message_with_alternatives([
-        _alt_document(350, 1920, 1080),
-        _alt_document(100, 1280, 720),
-        _alt_document(60, 854, 480),
+        _rendition(111.58, 1280, 720),
+        _rendition(0.02, 144, 80, duration=0.0),
+        _rendition(150.33, 1280, 720),
+        _rendition(0.02, 144, 80, duration=0.0),
+        _rendition(57.89, 852, 480),
+        _rendition(0.02, 144, 80, duration=0.0),
+        _rendition(73.62, 852, 480),
+        SimpleNamespace(size=140000, attributes=[]),
     ])
 
-    described = bridge.describe_alt_documents(message, 80 * 1024 * 1024)
+    described = bridge.describe_alt_documents(message, UPLOAD_LIMIT, PROCESSING_LIMIT)
 
-    assert "3 alternative qualities" in described
-    assert "350.0 MB 1920x1080 (above limit)" in described
-    assert "100.0 MB 1280x720 (above limit)" in described
-    assert "60.0 MB 854x480 (fits)" in described
+    assert "4 usable rendition(s) in 2 resolution(s)" in described
+    assert "4 preview clip(s) ignored" in described
+    assert "1280x720: 150.33 MB, 111.58 MB (above the upload limit, small enough for processing)" in described
+    assert "852x480: 73.62 MB, 57.89 MB (largest fitting the upload limit: 73.62 MB)" in described
+
+
+def test_resolution_group_above_the_processing_limit_is_labelled_as_such(bridge):
+    message = _message_with_alternatives([_rendition(863.43, 1920, 1080)])
+
+    described = bridge.describe_alt_documents(message, UPLOAD_LIMIT, PROCESSING_LIMIT)
+
+    assert "above the processing limit as well" in described
+
+
+def test_preview_clips_are_not_treated_as_renditions(bridge):
+    assert not bridge.is_rendition_document(_rendition(0.02, 144, 80, duration=0.0))
+    assert not bridge.is_rendition_document(_rendition(20, 1280, 720, video_start_ts=12.0))
+    assert not bridge.is_rendition_document(SimpleNamespace(size=140000, attributes=[]))
+    assert bridge.is_rendition_document(_rendition(20, 1280, 720))
+
+
+def test_only_preview_clips_is_reported_separately(bridge):
+    message = _message_with_alternatives([_rendition(0.02, 144, 80, duration=0.0)])
+
+    described = bridge.describe_alt_documents(message, UPLOAD_LIMIT, PROCESSING_LIMIT)
+
+    assert "none of them a usable rendition" in described
 
 
 def test_alternatives_are_reported_as_absent(bridge):
     expected = "Telegram lists no alternative qualities for this video."
 
-    assert bridge.describe_alt_documents(_message_with_alternatives([]), 80 * 1024 * 1024) == expected
-    assert bridge.describe_alt_documents(_message_with_alternatives(None), 80 * 1024 * 1024) == expected
-    assert bridge.describe_alt_documents(SimpleNamespace(media=None), 80 * 1024 * 1024) == expected
-
-
-def test_alternative_without_video_attribute_shows_unknown_resolution(bridge):
-    described = bridge.describe_alt_documents(
-        _message_with_alternatives([_alt_document(5)]), 80 * 1024 * 1024
-    )
-
-    assert "5.0 MB ? (fits)" in described
+    assert bridge.describe_alt_documents(_message_with_alternatives([]), UPLOAD_LIMIT, PROCESSING_LIMIT) == expected
+    assert bridge.describe_alt_documents(_message_with_alternatives(None), UPLOAD_LIMIT, PROCESSING_LIMIT) == expected
+    assert bridge.describe_alt_documents(SimpleNamespace(media=None), UPLOAD_LIMIT, PROCESSING_LIMIT) == expected
