@@ -1,5 +1,16 @@
 # TgMediaToMatrix
 
+<p>
+  <img src="https://img.shields.io/badge/AI-Assisted-blue" alt="AI Assisted" />
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT" /></a>
+  <a href="https://github.com/benjamin-aicheler/TgMediaToMatrix/actions"><img src="https://img.shields.io/github/actions/workflow/status/benjamin-aicheler/TgMediaToMatrix/ci.yml?branch=main" alt="GitHub build status" /></a>
+  <a href="https://github.com/benjamin-aicheler/TgMediaToMatrix/pkgs/container/tgmediatomatrix"><img src="https://img.shields.io/badge/Docker-ghcr.io-blue?logo=github" alt="GHCR Docker Image" /></a>
+  <img src="https://img.shields.io/badge/Python_3.13-3776AB?style=flat&logo=python&logoColor=white" alt="Python 3.13" />
+  <img src="https://img.shields.io/badge/Telethon-2C5BB4?style=flat" alt="Telethon" />
+  <img src="https://img.shields.io/badge/Matrix--nio-000000?style=flat&logo=matrix&logoColor=white" alt="matrix-nio" />
+  <img src="https://img.shields.io/badge/FFmpeg-007808?style=flat&logo=ffmpeg&logoColor=white" alt="FFmpeg" />
+</p>
+
 An asynchronous, lightweight Python-based bridge that automatically forwards media (images and videos) from Telegram channels or channel forum topics directly into a specified Matrix room.
 
 It extracts, uploads, and structures files cleanly to provide an optimized viewing experience on Matrix clients with fully populated metadata (dimensions, duration, thumbnails) and robust caption layouts.
