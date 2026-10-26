@@ -276,13 +276,17 @@ class FakeMatrixClient:
     def __init__(self, upload_ok=True, room_results=None):
         self.upload_ok = upload_ok
         self.room_results = list(room_results or [])
+        self.sent_rooms = []
+        self.upload_count = 0
 
     async def upload(self, *args, **kwargs):
+        self.upload_count += 1
         if not self.upload_ok:
             return object(), {}
         return nio.UploadResponse(content_uri="mxc://test.invalid/upload1"), {}
 
     async def room_send(self, room_id, message_type, content=None):
+        self.sent_rooms.append(room_id)
         return self.room_results.pop(0)
 
 
@@ -846,3 +850,246 @@ def test_video_thumbnail_is_a_small_jpeg_of_the_sampled_frame(bridge, tmp_path):
     assert (width, height) == (start[1], start[2])
     # The testsrc pattern changes over time, so two positions must not yield the same frame.
     assert start[0] != middle[0]
+
+
+# --- Per-room toggles ----------------------------------------------------------------
+
+ROOM_A = "!a:test.invalid"
+ROOM_B = "!b:test.invalid"
+ADMIN = "@admin:test.invalid"
+USER = "@user:test.invalid"
+
+
+def send_command(bridge, monkeypatch, body, sender=ADMIN, room_id=ROOM_A):
+    """Runs a !tmmb command and returns the notice it answered with."""
+    sent = {}
+
+    async def capture(room_id_sent, plain_text, html_text):
+        sent["room"] = room_id_sent
+        sent["plain"] = plain_text
+        sent["html"] = html_text
+
+    monkeypatch.setattr(bridge, "send_matrix_notice", capture)
+    room = SimpleNamespace(room_id=room_id)
+    event = SimpleNamespace(body=body, sender=sender, server_timestamp=None)
+    run(bridge.on_matrix_message(room, event))
+    return sent
+
+
+def two_rooms(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "MATRIX_ROOM_IDS", [ROOM_A, ROOM_B])
+    monkeypatch.setattr(bridge, "ADMIN_MATRIX_USER_ID", ADMIN)
+
+
+def test_room_toggle_follows_the_environment_default(bridge, monkeypatch):
+    monkeypatch.setattr(bridge, "ENABLE_IMAGES", False)
+    monkeypatch.setattr(bridge, "ENABLE_VIDEOS", True)
+
+    assert bridge.room_toggles.is_enabled(ROOM_A, "images") is False
+    assert bridge.room_toggles.is_enabled(ROOM_A, "videos") is True
+
+
+def test_room_toggle_override_applies_to_one_room_only(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    bridge.room_toggles.set(ROOM_A, "images", False)
+
+    assert bridge.room_toggles.is_enabled(ROOM_A, "images") is False
+    assert bridge.room_toggles.is_enabled(ROOM_B, "images") is True
+
+
+def test_room_toggle_reset_returns_to_the_environment_default(bridge):
+    bridge.room_toggles.set(ROOM_A, "videos", False)
+    bridge.room_toggles.reset()
+
+    assert bridge.room_toggles.is_enabled(ROOM_A, "videos") is True
+
+
+def test_enabled_rooms_follow_the_configuration_order(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    bridge.room_toggles.set(ROOM_B, "images", False)
+
+    assert bridge.room_toggles.enabled_rooms("images") == [ROOM_A]
+
+
+def test_media_kind_maps_mime_types(bridge):
+    assert bridge.media_kind("image/jpeg") == "images"
+    assert bridge.media_kind("video/mp4") == "videos"
+
+
+# --- Per-room fan-out ----------------------------------------------------------------
+
+
+def test_delivery_skips_the_room_with_the_kind_disabled(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    bridge.room_toggles.set(ROOM_B, "images", False)
+    client = FakeMatrixClient(room_results=[nio.RoomSendResponse(event_id="$1", room_id=ROOM_A)])
+    monkeypatch.setattr(bridge, "matrix_client", client)
+
+    ok = run(
+        bridge.send_matrix_media_event(
+            b"data", "image/jpeg", "a.jpg", "m.image", {"w": 1, "h": 1}, "chat", "chan"
+        )
+    )
+
+    assert ok is True
+    assert client.sent_rooms == [ROOM_A]
+    assert bridge.DELIVERY_STATS == {"failed": 0, "partial": 0}
+
+
+def test_delivery_without_any_enabled_room_does_not_upload_or_fail(bridge, monkeypatch):
+    bridge.room_toggles.set(bridge.MATRIX_ROOM_IDS[0], "videos", False)
+    client = FakeMatrixClient()
+    monkeypatch.setattr(bridge, "matrix_client", client)
+
+    ok = run(
+        bridge.send_matrix_media_event(
+            b"data", "video/mp4", "a.mp4", "m.video", {}, "chat", "chan"
+        )
+    )
+
+    assert ok is True
+    assert client.upload_count == 0
+    assert client.sent_rooms == []
+    assert bridge.DELIVERY_STATS == {"failed": 0, "partial": 0}
+
+
+def test_delivery_still_sends_videos_when_only_images_are_disabled(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    for room_id in (ROOM_A, ROOM_B):
+        bridge.room_toggles.set(room_id, "images", False)
+    client = FakeMatrixClient(
+        room_results=[
+            nio.RoomSendResponse(event_id="$1", room_id=ROOM_A),
+            nio.RoomSendResponse(event_id="$2", room_id=ROOM_B),
+        ]
+    )
+    monkeypatch.setattr(bridge, "matrix_client", client)
+
+    ok = run(
+        bridge.send_matrix_media_event(
+            b"data", "video/mp4", "a.mp4", "m.video", {}, "chat", "chan"
+        )
+    )
+
+    assert ok is True
+    assert client.sent_rooms == [ROOM_A, ROOM_B]
+
+
+# --- Command scope -------------------------------------------------------------------
+
+
+def test_start_without_scope_changes_only_the_sending_room(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "ENABLE_IMAGES", False)
+    monkeypatch.setattr(bridge, "ENABLE_VIDEOS", False)
+
+    sent = send_command(bridge, monkeypatch, "!tmmb start", room_id=ROOM_A)
+
+    assert bridge.room_toggles.is_enabled(ROOM_A, "images") is True
+    assert bridge.room_toggles.is_enabled(ROOM_A, "videos") is True
+    assert bridge.room_toggles.is_enabled(ROOM_B, "images") is False
+    assert "in this room" in sent["plain"]
+
+
+def test_start_all_changes_every_room(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "ENABLE_IMAGES", False)
+    monkeypatch.setattr(bridge, "ENABLE_VIDEOS", False)
+
+    sent = send_command(bridge, monkeypatch, "!tmmb start all", room_id=ROOM_A)
+
+    assert bridge.room_toggles.is_enabled(ROOM_B, "images") is True
+    assert bridge.room_toggles.is_enabled(ROOM_B, "videos") is True
+    assert "all 2 rooms" in sent["plain"]
+
+
+def test_stop_without_scope_is_allowed_for_non_admins(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "ALLOW_NON_ADMIN_STOP", True)
+
+    send_command(bridge, monkeypatch, "!tmmb stop", sender=USER, room_id=ROOM_A)
+
+    assert bridge.room_toggles.is_enabled(ROOM_A, "videos") is False
+    assert bridge.room_toggles.is_enabled(ROOM_B, "videos") is True
+
+
+def test_stop_all_is_refused_for_non_admins(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "ALLOW_NON_ADMIN_STOP", True)
+
+    sent = send_command(bridge, monkeypatch, "!tmmb stop all", sender=USER, room_id=ROOM_A)
+
+    assert bridge.room_toggles.is_enabled(ROOM_A, "videos") is True
+    assert bridge.room_toggles.is_enabled(ROOM_B, "videos") is True
+    assert "admin" in sent["plain"].lower()
+
+
+def test_start_all_is_refused_for_non_admins(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "ALLOW_NON_ADMIN_STOP", True)
+    monkeypatch.setattr(bridge, "ENABLE_IMAGES", False)
+
+    send_command(bridge, monkeypatch, "!tmmb start all", sender=USER, room_id=ROOM_A)
+
+    assert bridge.room_toggles.is_enabled(ROOM_B, "images") is False
+
+
+def test_image_disable_all_is_refused_for_non_admins(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "ALLOW_NON_ADMIN_STOP", True)
+
+    send_command(bridge, monkeypatch, "!tmmb image disable all", sender=USER, room_id=ROOM_A)
+
+    assert bridge.room_toggles.is_enabled(ROOM_A, "images") is True
+    assert bridge.room_toggles.is_enabled(ROOM_B, "images") is True
+
+
+def test_status_only_reports_the_sending_room(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "ALLOW_NON_ADMIN_STOP", True)
+    bridge.room_toggles.set(ROOM_A, "videos", False)
+
+    sent = send_command(bridge, monkeypatch, "!tmmb status", sender=USER, room_id=ROOM_A)
+
+    assert "images ENABLED, videos DISABLED" in sent["plain"]
+    assert ROOM_B not in sent["plain"]
+
+
+def test_status_all_hides_the_other_rooms_from_non_admins(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "ALLOW_NON_ADMIN_STOP", True)
+
+    sent = send_command(bridge, monkeypatch, "!tmmb status all", sender=USER, room_id=ROOM_A)
+
+    assert ROOM_A not in sent["plain"]
+    assert ROOM_B not in sent["plain"]
+    assert "admin" in sent["plain"].lower()
+
+
+def test_status_all_lists_every_room_for_admins(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    bridge.room_toggles.set(ROOM_B, "images", False)
+
+    sent = send_command(bridge, monkeypatch, "!tmmb status all", room_id=ROOM_A)
+
+    assert f"{ROOM_A} : images ENABLED, videos ENABLED" in sent["plain"]
+    assert f"{ROOM_B} : images DISABLED, videos ENABLED" in sent["plain"]
+
+
+def test_unknown_scope_argument_changes_nothing(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+    monkeypatch.setattr(bridge, "ENABLE_IMAGES", False)
+
+    sent = send_command(bridge, monkeypatch, "!tmmb start everyone", room_id=ROOM_A)
+
+    assert bridge.room_toggles.is_enabled(ROOM_A, "images") is False
+    assert "Usage" in sent["plain"]
+
+
+def test_help_mentions_the_all_scope(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+
+    sent = send_command(bridge, monkeypatch, "!tmmb help", room_id=ROOM_A)
+
+    assert "!tmmb start [all]" in sent["plain"]
+    assert "!tmmb status [all]" in sent["plain"]

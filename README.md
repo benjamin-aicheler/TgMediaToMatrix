@@ -44,7 +44,7 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
     - **Fast Low-Resource Compression (`compress`)**: Re-encodes videos down to 720p with `libx264` fast presets and audio stream passthrough.
     - **Ceiling Protection**: Rejects videos larger than `OVERSIZED_VIDEO_MAX_INPUT_MB` (e.g. 250 MB) before downloading to prevent OOM — unless one of Telegram's lower-resolution renditions fits (see *Alternate Renditions*).
 - **Alternate Renditions for Oversized Videos**: Instead of dropping a video that exceeds `MAX_MEDIA_SIZE_MB`, the bridge uses one of Telegram's lower-resolution renditions (`alt_documents`): the highest resolution that fits the upload limit is sent as a single message without FFmpeg, otherwise the highest that fits the processing ceiling is split or compressed. Controlled by `PREFER_ALTERNATE_RENDITION` (default `true`).
-- **Dynamic Interactive Chat Commands**: When `ADMIN_MATRIX_USER_ID` is set, the authorized admin user can send `!tmmb` commands in Matrix to query status or dynamically toggle image and video bridging on the fly.
+- **Dynamic Interactive Chat Commands**: When `ADMIN_MATRIX_USER_ID` is set, the authorized admin user can send `!tmmb` commands in Matrix to query status or dynamically toggle image and video bridging on the fly — per room, or for every room with the trailing `all`.
 
 ---
 
@@ -85,8 +85,8 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `VIDEO_COMPRESSION_THREADS` | Number of CPU threads allocated to FFmpeg | `2` (Default: `2`) |
 | `MIN_IMAGE_SIZE_KB` | Minimum file size in KB for images to be forwarded (accepts `MIN_IMAGE_SIZE_MB`) | `100` (Default: `0` / Disabled) |
 | `MIN_VIDEO_SIZE_KB` | Minimum file size in KB for videos to be forwarded (accepts `MIN_VIDEO_SIZE_MB`) | `1024` (Default: `0` / Disabled) |
-| `ENABLE_IMAGES` | Set to `false` to disable bridging of images | `true` (Default: `true`) |
-| `ENABLE_VIDEOS` | Set to `false` to disable bridging of videos | `true` (Default: `true`) |
+| `ENABLE_IMAGES` | Default for image bridging in every room at startup (change per room at runtime with `!tmmb`) | `true` (Default: `true`) |
+| `ENABLE_VIDEOS` | Default for video bridging in every room at startup (change per room at runtime with `!tmmb`) | `true` (Default: `true`) |
 | `DEDUPLICATION_ENABLED` | Enable prevention of duplicate media forwarding | `true` (Default: `true`) |
 | `DEDUPLICATION_TTL_MINUTES` | Expiration window in minutes for duplicate suppression | `15` (Default: `15`) |
 | `DEDUPLICATION_CACHE_SIZE` | Maximum number of recently processed media hashes/IDs to remember | `2000` (Default: `2000`) |
@@ -102,16 +102,23 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 
 ## Dynamic Chat Commands (`!tmmb`)
 
-When `ADMIN_MATRIX_USER_ID` is configured, the bridge listens for real-time control commands issued by that specific Matrix user ID in the Matrix room:
+When `ADMIN_MATRIX_USER_ID` is configured, the bridge listens for real-time control commands issued by that specific Matrix user ID in the Matrix room.
+
+Every toggle is scoped to a room: a command without an argument changes only the room it was sent in, the trailing `all` applies it to every configured room. `all` is reserved for the admin, so ordinary users cannot see which rooms the bridge posts to. At startup every room starts on the `ENABLE_IMAGES` / `ENABLE_VIDEOS` value; the overrides live in memory only and a restart returns every room to the environment default.
 
 | Command | Description |
 | :--- | :--- |
-| `!tmmb start` | Dynamically enable both image and video bridging simultaneously |
-| `!tmmb stop` | Dynamically disable both image and video bridging simultaneously |
-| `!tmmb image enable` / `disable` | Dynamically turn image bridging on or off in memory until container restart or next command |
-| `!tmmb video enable` / `disable` | Dynamically turn video bridging on or off in memory until container restart or next command |
-| `!tmmb status` | View the current runtime enablement state of image and video bridging |
+| `!tmmb start` | Enable both image and video bridging in this room (admin only) |
+| `!tmmb start all` | Enable both image and video bridging in every room (admin only) |
+| `!tmmb stop` | Disable both image and video bridging in this room |
+| `!tmmb stop all` | Disable both image and video bridging in every room (admin only) |
+| `!tmmb image enable` / `disable` | Turn image bridging on or off in this room until container restart or next command |
+| `!tmmb video enable` / `disable` | Turn video bridging on or off in this room until container restart or next command |
+| `!tmmb status` | View this room's enablement state plus the global runtime counters |
+| `!tmmb status all` | View the enablement state of every configured room (admin only) |
 | `!tmmb help` | Show command usage and instructions |
+
+`enable`/`start` require the admin; `stop`/`disable` follow `ALLOW_NON_ADMIN_STOP` for the own room, and require the admin when combined with `all`.
 
 
 ### Specifying Channels & Topics in `TG_CHANNELS`

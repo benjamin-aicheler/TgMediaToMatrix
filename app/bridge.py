@@ -100,8 +100,8 @@ async def main():
     )
     logger.info(f"Configured min image limit: {config.MIN_IMAGE_SIZE_KB} KB ({round(config.MIN_IMAGE_SIZE_KB / 1024, 2)} MB)" if config.MIN_IMAGE_SIZE_KB > 0 else "Configured min image limit: None")
     logger.info(f"Configured min video limit: {config.MIN_VIDEO_SIZE_KB} KB ({round(config.MIN_VIDEO_SIZE_KB / 1024, 2)} MB)" if config.MIN_VIDEO_SIZE_KB > 0 else "Configured min video limit: None")
-    logger.info(f"Images enabled: {config.ENABLE_IMAGES}")
-    logger.info(f"Videos enabled: {config.ENABLE_VIDEOS}")
+    logger.info(f"Images enabled by default (ENABLE_IMAGES): {config.ENABLE_IMAGES}")
+    logger.info(f"Videos enabled by default (ENABLE_VIDEOS): {config.ENABLE_VIDEOS}")
     logger.info(f"Media deduplication: {'Enabled' if config.DEDUPLICATION_ENABLED else 'Disabled'} (TTL: {config.DEDUPLICATION_TTL_MINUTES} min, Max cache: {config.DEDUPLICATION_CACHE_SIZE})")
 
     matrix_sync_task = None

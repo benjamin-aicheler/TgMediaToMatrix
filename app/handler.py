@@ -137,12 +137,11 @@ async def process_and_upload_media(message, source_chat, channel_name, download_
     if not (is_image or is_video):
         return
 
-    if is_image and not config.ENABLE_IMAGES:
-        logger.info(f"[{source_chat}] Skipping image media because ENABLE_IMAGES is false.")
-        return
-
-    if is_video and not config.ENABLE_VIDEOS:
-        logger.info(f"[{source_chat}] Skipping video media because ENABLE_VIDEOS is false.")
+    # Enablement is per destination room, so the download is only skipped when no room at
+    # all accepts this kind of media; the fan-out in matrix_io then filters the rest.
+    kind = state.media_kind(mime_type)
+    if not state.room_toggles.any_enabled(kind):
+        logger.info(f"[{source_chat}] Skipping {kind} media because no destination room has them enabled.")
         return
 
     if not filename:

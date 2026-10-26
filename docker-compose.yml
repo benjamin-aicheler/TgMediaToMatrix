@@ -27,6 +27,7 @@ services:
       - VIDEO_COMPRESSION_THREADS=2
       - MIN_IMAGE_SIZE_KB=0
       - MIN_VIDEO_SIZE_KB=0
+      # Startup defaults for every destination room; switch rooms at runtime with !tmmb
       - ENABLE_IMAGES=true
       - ENABLE_VIDEOS=true
       - DEDUPLICATION_ENABLED=true

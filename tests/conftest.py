@@ -98,6 +98,7 @@ def bridge(bridge_module, monkeypatch):
     """Per-test state: fresh caches/counters and unpatched configuration afterwards."""
     bridge_module.PROCESSED_ALBUMS.clear()
     bridge_module.TOPIC_NAMES_CACHE.clear()
+    bridge_module.room_toggles.reset()
     bridge_module.SAFETY_STATS.update({"blocked": 0, "unavailable": 0})
     bridge_module.DELIVERY_STATS.update({"failed": 0, "partial": 0})
     for name in MUTABLE_GLOBALS:
