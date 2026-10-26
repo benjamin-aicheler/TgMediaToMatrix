@@ -39,7 +39,7 @@ jsonschema-specifications==2025.9.1
     # via jsonschema
 matrix-nio==0.26.0
     # via -r requirements-dev.in
-multidict==7.1.0
+multidict==7.2.1
     # via
     #   aiohttp
     #   yarl
@@ -55,7 +55,7 @@ pyaes==1.6.1
     # via telethon
 pyasn1==0.6.4
     # via rsa
-pycryptodome==4.1.0
+pycryptodome==4.2.0
     # via matrix-nio
 pygments==2.21.0
     # via pytest
