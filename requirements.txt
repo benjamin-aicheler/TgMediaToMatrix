@@ -17,7 +17,7 @@ attrs==26.1.0
     #   aiohttp
     #   jsonschema
     #   referencing
-av==19.0.1
+av==19.0.2
     # via -r requirements.in
 blurhash==1.1.5
     # via -r requirements.in
@@ -59,7 +59,7 @@ pyasn1==0.6.4
     # via rsa
 pycryptodome==4.1.0
     # via matrix-nio
-python-socks==3.1.1
+python-socks[asyncio]==3.1.1
     # via aiohttp-socks
 referencing==0.37.0
     # via
