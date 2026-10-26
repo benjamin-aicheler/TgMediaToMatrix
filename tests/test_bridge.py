@@ -1000,7 +1000,17 @@ def test_start_all_changes_every_room(bridge, monkeypatch):
 
     assert bridge.room_toggles.is_enabled(ROOM_B, "images") is True
     assert bridge.room_toggles.is_enabled(ROOM_B, "videos") is True
-    assert "all 2 rooms" in sent["plain"]
+    assert "in all rooms" in sent["plain"]
+
+
+def test_all_scope_confirmation_never_reveals_the_room_count(bridge, monkeypatch):
+    two_rooms(bridge, monkeypatch)
+
+    for body in ("!tmmb start all", "!tmmb stop all", "!tmmb image disable all", "!tmmb video disable all"):
+        sent = send_command(bridge, monkeypatch, body, room_id=ROOM_A)
+        # The notice lands in the room, so a count would be visible to every member.
+        assert "2" not in sent["plain"], body
+        assert "in all rooms" in sent["plain"], body
 
 
 def test_stop_without_scope_is_allowed_for_non_admins(bridge, monkeypatch):

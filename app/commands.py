@@ -149,8 +149,10 @@ async def on_matrix_message(room, event: RoomMessageText):
                 state.room_toggles.set(target_room, target_kind, enabled)
         return rooms
 
-    def scope_suffix(rooms: list[str]) -> str:
-        return f"in all {len(rooms)} rooms" if len(rooms) > 1 else "in this room"
+    def scope_suffix(all_rooms: bool) -> str:
+        # Deliberately without a room count: the notice lands in the room, so everyone
+        # present would learn how many rooms the bridge posts to.
+        return "in all rooms" if all_rooms else "in this room"
 
     if subcmd in ("help", "-h", "--help"):
         await notice(HELP_PLAIN, HELP_HTML)
@@ -172,8 +174,8 @@ async def on_matrix_message(room, event: RoomMessageText):
             f"for {len(rooms)} room(s): {', '.join(rooms)}."
         )
         await notice(
-            f"[TgMediaToMatrix] Image and video bridging have been STARTED (ENABLED) {scope_suffix(rooms)}.",
-            f"<strong>[TgMediaToMatrix]</strong> Image and video bridging have been <code>STARTED</code> (ENABLED) {scope_suffix(rooms)}."
+            f"[TgMediaToMatrix] Image and video bridging have been STARTED (ENABLED) {scope_suffix(all_rooms)}.",
+            f"<strong>[TgMediaToMatrix]</strong> Image and video bridging have been <code>STARTED</code> (ENABLED) {scope_suffix(all_rooms)}."
         )
         return
 
@@ -193,8 +195,8 @@ async def on_matrix_message(room, event: RoomMessageText):
             f"for {len(rooms)} room(s): {', '.join(rooms)}."
         )
         await notice(
-            f"[TgMediaToMatrix] Image and video bridging have been STOPPED (DISABLED) {scope_suffix(rooms)}.",
-            f"<strong>[TgMediaToMatrix]</strong> Image and video bridging have been <code>STOPPED</code> (DISABLED) {scope_suffix(rooms)}."
+            f"[TgMediaToMatrix] Image and video bridging have been STOPPED (DISABLED) {scope_suffix(all_rooms)}.",
+            f"<strong>[TgMediaToMatrix]</strong> Image and video bridging have been <code>STOPPED</code> (DISABLED) {scope_suffix(all_rooms)}."
         )
         return
 
@@ -240,8 +242,8 @@ async def on_matrix_message(room, event: RoomMessageText):
             rooms = apply("images", True, all_rooms)
             logger.info(f"[{room.room_id}] User '{event.sender}' ENABLED image bridging for {len(rooms)} room(s).")
             await notice(
-                f"[TgMediaToMatrix] Image bridging has been ENABLED {scope_suffix(rooms)}.",
-                f"<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>ENABLED</code> {scope_suffix(rooms)}."
+                f"[TgMediaToMatrix] Image bridging has been ENABLED {scope_suffix(all_rooms)}.",
+                f"<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>ENABLED</code> {scope_suffix(all_rooms)}."
             )
         elif action in DISABLE_ACTIONS:
             if all_rooms and not is_admin:
@@ -250,8 +252,8 @@ async def on_matrix_message(room, event: RoomMessageText):
             rooms = apply("images", False, all_rooms)
             logger.info(f"[{room.room_id}] User '{event.sender}' DISABLED image bridging for {len(rooms)} room(s).")
             await notice(
-                f"[TgMediaToMatrix] Image bridging has been DISABLED {scope_suffix(rooms)}.",
-                f"<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>DISABLED</code> {scope_suffix(rooms)}."
+                f"[TgMediaToMatrix] Image bridging has been DISABLED {scope_suffix(all_rooms)}.",
+                f"<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>DISABLED</code> {scope_suffix(all_rooms)}."
             )
         else:
             await notice(
@@ -278,8 +280,8 @@ async def on_matrix_message(room, event: RoomMessageText):
             rooms = apply("videos", True, all_rooms)
             logger.info(f"[{room.room_id}] User '{event.sender}' ENABLED video bridging for {len(rooms)} room(s).")
             await notice(
-                f"[TgMediaToMatrix] Video bridging has been ENABLED {scope_suffix(rooms)}.",
-                f"<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>ENABLED</code> {scope_suffix(rooms)}."
+                f"[TgMediaToMatrix] Video bridging has been ENABLED {scope_suffix(all_rooms)}.",
+                f"<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>ENABLED</code> {scope_suffix(all_rooms)}."
             )
         elif action in DISABLE_ACTIONS:
             if all_rooms and not is_admin:
@@ -288,8 +290,8 @@ async def on_matrix_message(room, event: RoomMessageText):
             rooms = apply("videos", False, all_rooms)
             logger.info(f"[{room.room_id}] User '{event.sender}' DISABLED video bridging for {len(rooms)} room(s).")
             await notice(
-                f"[TgMediaToMatrix] Video bridging has been DISABLED {scope_suffix(rooms)}.",
-                f"<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>DISABLED</code> {scope_suffix(rooms)}."
+                f"[TgMediaToMatrix] Video bridging has been DISABLED {scope_suffix(all_rooms)}.",
+                f"<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>DISABLED</code> {scope_suffix(all_rooms)}."
             )
         else:
             await notice(
