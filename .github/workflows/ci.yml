@@ -15,9 +15,9 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Ruff (defaults + B, LOG, BLE)
-        uses: astral-sh/ruff-action@v3
+        uses: astral-sh/ruff-action@v4
         with:
-          version: "0.17.1"
+          version: "0.17.2"
           args: "check --extend-select B,LOG,BLE --output-format concise"
 
   test:
