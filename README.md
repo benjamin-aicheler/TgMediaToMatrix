@@ -104,7 +104,7 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 
 When `ADMIN_MATRIX_USER_ID` is configured, the bridge listens for real-time control commands issued by that specific Matrix user ID in the Matrix room.
 
-Every toggle is scoped to a room: a command without an argument changes only the room it was sent in, the trailing `all` applies it to every configured room. `all` is reserved for the admin, so ordinary users cannot see which rooms the bridge posts to. At startup every room starts on the `ENABLE_IMAGES` / `ENABLE_VIDEOS` value; the overrides live in memory only and a restart returns every room to the environment default.
+Every toggle is scoped to a room: a command without an argument changes only the room it was sent in, the trailing `all` applies it to every configured room. `all` is reserved for the admin, so ordinary users cannot see which rooms the bridge posts to, and the confirmation of an `all` command never states how many rooms exist. At startup every room starts on the `ENABLE_IMAGES` / `ENABLE_VIDEOS` value; the overrides live in memory only and a restart returns every room to the environment default.
 
 | Command | Description |
 | :--- | :--- |

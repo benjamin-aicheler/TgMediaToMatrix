@@ -16,7 +16,8 @@ This file contains development rules and architectural guidelines for AI agents 
 - Use `matrix_client.upload()` with in-memory `io.BytesIO` streams rather than writing media to disk or utilizing external libraries (e.g., `httpx`) unless specifically requested.
 - Maintain a single, globally-reused `AsyncClient` instance for room communication and media uploads. Ensure it is closed gracefully when the main program stops.
 - Interactive Matrix commands (`!tmmb`) must be authorized strictly against `ADMIN_MATRIX_USER_ID` (with optional non-admin `stop`/`disable` permissions if `ALLOW_NON_ADMIN_STOP` is set) and ignore historical events received prior to startup.
-- Image/video enablement is per destination room (`state.room_toggles`). A command without the trailing `all` may only touch the room it was sent in; every `all` variant — including `status all`, so the room list is not disclosed — is reserved for the admin. Without an override a room follows `ENABLE_IMAGES` / `ENABLE_VIDEOS`, so a restart returns to the environment defaults.
+- Image/video enablement is per destination room (`state.room_toggles`). A command without the trailing `all` may only touch the room it was sent in; every `all` variant is reserved for the admin, and `status all` (which lists the room IDs on purpose) is admin-only for that reason. Without an override a room follows `ENABLE_IMAGES` / `ENABLE_VIDEOS`, so a restart returns to the environment defaults.
+- Command confirmations are posted as room messages, so they must stay free of room IDs and room counts; only `status all` names rooms, and only a call the admin made.
 
 ---
 
