@@ -3,7 +3,6 @@
 import io
 import logging
 
-import config
 import state
 from nio import RoomSendError, RoomSendResponse, UploadResponse
 
@@ -39,7 +38,20 @@ async def send_matrix_media_event(
     caption_prefix: str | None = None,
     blurhash_str: str | None = None
 ) -> bool:
-    """Uploads in-memory media bytes to Matrix homeserver and dispatches room messages across MATRIX_ROOM_IDS."""
+    """Uploads in-memory media bytes to Matrix homeserver and dispatches room messages across MATRIX_ROOM_IDS.
+
+    Only rooms that currently accept this media kind receive the event; rooms where it is
+    switched off with ``!tmmb`` are skipped silently and do not count as a delivery failure.
+    """
+    kind = state.media_kind(mime_type)
+    target_rooms = state.room_toggles.enabled_rooms(kind)
+    if not target_rooms:
+        # Every room has this kind switched off (the handler normally drops the media before
+        # downloading, so this only happens when a toggle flips mid-flight). Nothing was
+        # attempted, so the caller must not release the deduplication marks for it.
+        logger.info(f"[{source_chat}] {filename} not uploaded: no room has {kind} enabled right now.")
+        return True
+
     logger.info(f"[{source_chat}] Uploading to Matrix homeserver: {filename} ({len(media_bytes)} bytes)...")
     try:
         upload_resp, _ = await state.matrix_client.upload(
@@ -90,7 +102,7 @@ async def send_matrix_media_event(
 
         delivered_rooms = []
         failed_rooms = []
-        for target_room_id in config.MATRIX_ROOM_IDS:
+        for target_room_id in target_rooms:
             try:
                 send_response = await state.matrix_client.room_send(
                     room_id=target_room_id,
@@ -114,7 +126,7 @@ async def send_matrix_media_event(
         if not delivered_rooms:
             state.DELIVERY_STATS["failed"] += 1
             logger.error(
-                f"[{source_chat}] {filename} reached none of the {len(config.MATRIX_ROOM_IDS)} configured room(s) "
+                f"[{source_chat}] {filename} reached none of the {len(target_rooms)} addressed room(s) "
                 f"({', '.join(failed_rooms) if failed_rooms else 'no rooms configured'}). "
                 f"Reporting failure so the caller can release the deduplication marks."
             )
@@ -123,7 +135,7 @@ async def send_matrix_media_event(
         if failed_rooms:
             state.DELIVERY_STATS["partial"] += 1
             logger.warning(
-                f"[{source_chat}] {filename} reached {len(delivered_rooms)}/{len(config.MATRIX_ROOM_IDS)} rooms; "
+                f"[{source_chat}] {filename} reached {len(delivered_rooms)}/{len(target_rooms)} rooms; "
                 f"failed: {', '.join(failed_rooms)}."
             )
         return True

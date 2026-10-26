@@ -81,6 +81,51 @@ media_deduplicator = MediaDeduplicator(
     max_size=config.DEDUPLICATION_CACHE_SIZE
 )
 
+
+# The two media kinds that can be switched per room.
+ROOM_MEDIA_KINDS = ("images", "videos")
+
+
+def media_kind(mime_type: str) -> str:
+    """Map a MIME type onto the per-room toggle it belongs to."""
+    return "images" if mime_type.startswith("image/") else "videos"
+
+
+class RoomToggles:
+    """Per-room enablement of image and video bridging.
+
+    A room without an explicit override follows ``ENABLE_IMAGES`` / ``ENABLE_VIDEOS``, so
+    every room starts out on the value from the environment and a restart always returns
+    to it. The ``!tmmb`` commands only store overrides for the rooms they target; the
+    configured room list itself is read from the configuration on every lookup.
+    """
+
+    def __init__(self):
+        self._overrides: dict[str, dict[str, bool]] = {}
+
+    @staticmethod
+    def _default(kind: str) -> bool:
+        return config.ENABLE_IMAGES if kind == "images" else config.ENABLE_VIDEOS
+
+    def is_enabled(self, room_id: str, kind: str) -> bool:
+        return self._overrides.get(room_id, {}).get(kind, self._default(kind))
+
+    def set(self, room_id: str, kind: str, enabled: bool) -> None:
+        self._overrides.setdefault(room_id, {})[kind] = enabled
+
+    def enabled_rooms(self, kind: str) -> list[str]:
+        """Configured rooms that currently accept this media kind, in configuration order."""
+        return [room_id for room_id in config.MATRIX_ROOM_IDS if self.is_enabled(room_id, kind)]
+
+    def any_enabled(self, kind: str) -> bool:
+        return any(self.is_enabled(room_id, kind) for room_id in config.MATRIX_ROOM_IDS)
+
+    def reset(self) -> None:
+        self._overrides.clear()
+
+
+room_toggles = RoomToggles()
+
 # Cache for resolved topic names, bounded like the deduplication cache: a long-running bot
 # must not accumulate one entry per topic it has ever seen.
 TOPIC_NAMES_CACHE_SIZE = 500

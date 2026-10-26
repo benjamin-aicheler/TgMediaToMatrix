@@ -1,4 +1,10 @@
-"""The !tmmb command handler."""
+"""The !tmmb command handler.
+
+Every toggle is scoped to a room: a command without an argument changes only the room it
+was sent in, while the trailing ``all`` applies it to every configured room. The ``all``
+scope is reserved for the admin so that ordinary users cannot enumerate the rooms the
+bridge posts to.
+"""
 
 import html
 import logging
@@ -9,6 +15,82 @@ import state
 from nio import RoomMessageText
 
 logger = logging.getLogger("tgmabr")
+
+ALL_SCOPE = "all"
+
+ENABLE_ACTIONS = ("enable", "on", "true", "1")
+DISABLE_ACTIONS = ("disable", "off", "false", "0")
+
+HELP_PLAIN = (
+    "[TgMediaToMatrix] Command Usage:\n"
+    "- !tmmb start [all] : Enable both image and video bridging in this room, or in all rooms (Admin only)\n"
+    "- !tmmb stop [all] : Disable both image and video bridging in this room, or in all rooms (Admin only with 'all')\n"
+    "- !tmmb image enable/disable [all] : Enable (Admin only) or disable image bridging\n"
+    "- !tmmb video enable/disable [all] : Enable (Admin only) or disable video bridging\n"
+    "- !tmmb status [all] : View the bridging status of this room, or of all rooms (Admin only with 'all')\n"
+    "Without 'all' a command applies to the room it was sent in."
+)
+HELP_HTML = (
+    "<strong>[TgMediaToMatrix] Command Usage:</strong><br/>"
+    "• <code>!tmmb start [all]</code> : Enable both image and video bridging in this room, or in all rooms <em>(Admin only)</em><br/>"
+    "• <code>!tmmb stop [all]</code> : Disable both image and video bridging in this room, or in all rooms <em>(Admin only with 'all')</em><br/>"
+    "• <code>!tmmb image enable/disable [all]</code> : Enable <em>(Admin only)</em> or disable image bridging<br/>"
+    "• <code>!tmmb video enable/disable [all]</code> : Enable <em>(Admin only)</em> or disable video bridging<br/>"
+    "• <code>!tmmb status [all]</code> : View the bridging status of this room, or of all rooms <em>(Admin only with 'all')</em><br/>"
+    "Without <code>all</code> a command applies to the room it was sent in."
+)
+
+
+def parse_scope(parts: list[str], index: int) -> tuple[bool, str | None]:
+    """Read the optional trailing ``all`` argument.
+
+    Returns ``(targets_all_rooms, invalid_token)``. Extra arguments are reported instead of
+    ignored, so a typo cannot silently widen a command to every room.
+    """
+    extra = parts[index:]
+    if not extra:
+        return False, None
+    if len(extra) == 1 and extra[0].lower() == ALL_SCOPE:
+        return True, None
+    return False, extra[0]
+
+
+def scope_rooms(room_id: str, all_rooms: bool) -> list[str]:
+    return list(config.MATRIX_ROOM_IDS) if all_rooms else [room_id]
+
+
+def status_word(enabled: bool) -> str:
+    return "ENABLED" if enabled else "DISABLED"
+
+
+def room_status_line(room_id: str, with_id: bool) -> tuple[str, str]:
+    """Plain and HTML status of one room."""
+    images = status_word(state.room_toggles.is_enabled(room_id, "images"))
+    videos = status_word(state.room_toggles.is_enabled(room_id, "videos"))
+    plain_prefix = f"{room_id} : " if with_id else ""
+    html_prefix = f"<code>{html.escape(room_id)}</code> : " if with_id else ""
+    plain = f"{plain_prefix}images {images}, videos {videos}"
+    html_text = f"{html_prefix}images <code>{images}</code>, videos <code>{videos}</code>"
+    return plain, html_text
+
+
+def global_status_lines() -> tuple[list[str], list[str]]:
+    """Instance-wide values that are not switchable per room."""
+    plain = [
+        f"- Oversized Videos: {config.OVERSIZED_VIDEO_ACTION.upper()} (Limit: {config.MAX_MEDIA_SIZE_MB}MB, Ceiling: {config.OVERSIZED_VIDEO_MAX_INPUT_MB}MB)",
+        f"- Alternate Renditions: {status_word(config.PREFER_ALTERNATE_RENDITION)}",
+        f"- Deduplication: {status_word(config.DEDUPLICATION_ENABLED)} (TTL: {config.DEDUPLICATION_TTL_MINUTES}m, Cache: {len(state.media_deduplicator._cache)}/{config.DEDUPLICATION_CACHE_SIZE})",
+        f"- Safety: {status_word(bool(config.LLAMAGUARD_API_URL))} (Blocked: {state.SAFETY_STATS['blocked']}, Unavailable: {state.SAFETY_STATS['unavailable']})",
+        f"- Delivery: {state.DELIVERY_STATS['partial']} partial, {state.DELIVERY_STATS['failed']} failed (since start)",
+    ]
+    html_lines = [
+        f"• Oversized Videos: <code>{config.OVERSIZED_VIDEO_ACTION.upper()}</code> (Limit: {config.MAX_MEDIA_SIZE_MB}MB, Ceiling: {config.OVERSIZED_VIDEO_MAX_INPUT_MB}MB)",
+        f"• Alternate Renditions: <code>{status_word(config.PREFER_ALTERNATE_RENDITION)}</code>",
+        f"• Deduplication: <code>{status_word(config.DEDUPLICATION_ENABLED)}</code> (TTL: {config.DEDUPLICATION_TTL_MINUTES}m, Cache: {len(state.media_deduplicator._cache)}/{config.DEDUPLICATION_CACHE_SIZE})",
+        f"• Safety: <code>{status_word(bool(config.LLAMAGUARD_API_URL))}</code> (Blocked: {state.SAFETY_STATS['blocked']}, Unavailable: {state.SAFETY_STATS['unavailable']})",
+        f"• Delivery: {state.DELIVERY_STATS['partial']} partial, {state.DELIVERY_STATS['failed']} failed (since start)",
+    ]
+    return plain, html_lines
 
 
 async def on_matrix_message(room, event: RoomMessageText):
@@ -40,137 +122,182 @@ async def on_matrix_message(room, event: RoomMessageText):
     logger.info(f"[{room.room_id}] Command received from user '{event.sender}': '{body}'")
 
     parts = body.split()
-    if len(parts) == 1 or parts[1].lower() in ("help", "-h", "--help"):
-        help_plain = (
-            "[TgMediaToMatrix] Command Usage:\n"
-            "- !tmmb start : Enable both image and video bridging (Admin only)\n"
-            "- !tmmb stop : Disable both image and video bridging\n"
-            "- !tmmb image enable/disable : Enable (Admin only) or disable image bridging\n"
-            "- !tmmb video enable/disable : Enable (Admin only) or disable video bridging\n"
-            "- !tmmb status : View current bridging status"
-        )
-        help_html = (
-            "<strong>[TgMediaToMatrix] Command Usage:</strong><br/>"
-            "• <code>!tmmb start</code> : Enable both image and video bridging <em>(Admin only)</em><br/>"
-            "• <code>!tmmb stop</code> : Disable both image and video bridging<br/>"
-            "• <code>!tmmb image enable/disable</code> : Enable <em>(Admin only)</em> or disable image bridging<br/>"
-            "• <code>!tmmb video enable/disable</code> : Enable <em>(Admin only)</em> or disable video bridging<br/>"
-            "• <code>!tmmb status</code> : View current bridging status"
-        )
-        await matrix_io.send_matrix_notice(room.room_id, help_plain, help_html)
-        return
+    subcmd = parts[1].lower() if len(parts) > 1 else "help"
 
-    subcmd = parts[1].lower()
+    async def notice(plain: str, html_text: str):
+        await matrix_io.send_matrix_notice(room.room_id, plain, html_text)
+
+    async def refuse_non_admin(what: str):
+        logger.warning(f"[{room.room_id}] Refused admin-only action to '{event.sender}': {what}")
+        await notice(
+            f"[TgMediaToMatrix] Only the configured admin user can {what}.",
+            f"<strong>[TgMediaToMatrix]</strong> Only the configured admin user can {html.escape(what)}."
+        )
+
+    async def refuse_scope(invalid_token: str, usage: str):
+        logger.warning(f"[{room.room_id}] Unknown command argument from '{event.sender}': '{invalid_token}'")
+        await notice(
+            f"[TgMediaToMatrix] Unknown argument '{invalid_token}'. Usage: {usage}",
+            f"<strong>[TgMediaToMatrix]</strong> Unknown argument <code>{html.escape(invalid_token)}</code>. Usage: <code>{html.escape(usage)}</code>"
+        )
+
+    def apply(kind: str | None, enabled: bool, all_rooms: bool) -> list[str]:
+        rooms = scope_rooms(room.room_id, all_rooms)
+        kinds = state.ROOM_MEDIA_KINDS if kind is None else (kind,)
+        for target_room in rooms:
+            for target_kind in kinds:
+                state.room_toggles.set(target_room, target_kind, enabled)
+        return rooms
+
+    def scope_suffix(rooms: list[str]) -> str:
+        return f"in all {len(rooms)} rooms" if len(rooms) > 1 else "in this room"
+
+    if subcmd in ("help", "-h", "--help"):
+        await notice(HELP_PLAIN, HELP_HTML)
+        return
 
     # START / ENABLE (Both) -> Requires Admin
-    if subcmd in ("start", "enable") and len(parts) == 2:
+    if subcmd in ("start", "enable"):
+        all_rooms, invalid = parse_scope(parts, 2)
+        if invalid is not None:
+            await refuse_scope(invalid, "!tmmb start [all]")
+            return
         if not is_admin:
-            logger.warning(f"[{room.room_id}] Unauthorized start attempt by non-admin '{event.sender}': '{body}'")
-            notice_plain = "[TgMediaToMatrix] Only the configured admin user can start/enable media bridging."
-            notice_html = "<strong>[TgMediaToMatrix]</strong> Only the configured admin user can start/enable media bridging."
-            await matrix_io.send_matrix_notice(room.room_id, notice_plain, notice_html)
+            await refuse_non_admin("start/enable media bridging")
             return
 
-        config.ENABLE_IMAGES = True
-        config.ENABLE_VIDEOS = True
-        logger.info(f"[{room.room_id}] User '{event.sender}' STARTED (ENABLED) both image and video bridging.")
-        msg_plain = "[TgMediaToMatrix] Both image and video bridging have been STARTED (ENABLED)."
-        msg_html = "<strong>[TgMediaToMatrix]</strong> Both image and video bridging have been <code>STARTED</code> (ENABLED)."
-        await matrix_io.send_matrix_notice(room.room_id, msg_plain, msg_html)
+        rooms = apply(None, True, all_rooms)
+        logger.info(
+            f"[{room.room_id}] User '{event.sender}' STARTED (ENABLED) image and video bridging "
+            f"for {len(rooms)} room(s): {', '.join(rooms)}."
+        )
+        await notice(
+            f"[TgMediaToMatrix] Image and video bridging have been STARTED (ENABLED) {scope_suffix(rooms)}.",
+            f"<strong>[TgMediaToMatrix]</strong> Image and video bridging have been <code>STARTED</code> (ENABLED) {scope_suffix(rooms)}."
+        )
         return
 
-    # STOP / DISABLE (Both) -> Admin or ALLOW_NON_ADMIN_STOP
-    if subcmd in ("stop", "disable") and len(parts) == 2:
-        config.ENABLE_IMAGES = False
-        config.ENABLE_VIDEOS = False
-        logger.info(f"[{room.room_id}] User '{event.sender}' STOPPED (DISABLED) both image and video bridging.")
-        msg_plain = "[TgMediaToMatrix] Both image and video bridging have been STOPPED (DISABLED)."
-        msg_html = "<strong>[TgMediaToMatrix]</strong> Both image and video bridging have been <code>STOPPED</code> (DISABLED)."
-        await matrix_io.send_matrix_notice(room.room_id, msg_plain, msg_html)
+    # STOP / DISABLE (Both) -> Admin, or ALLOW_NON_ADMIN_STOP for the own room
+    if subcmd in ("stop", "disable"):
+        all_rooms, invalid = parse_scope(parts, 2)
+        if invalid is not None:
+            await refuse_scope(invalid, "!tmmb stop [all]")
+            return
+        if all_rooms and not is_admin:
+            await refuse_non_admin("stop media bridging in all rooms")
+            return
+
+        rooms = apply(None, False, all_rooms)
+        logger.info(
+            f"[{room.room_id}] User '{event.sender}' STOPPED (DISABLED) image and video bridging "
+            f"for {len(rooms)} room(s): {', '.join(rooms)}."
+        )
+        await notice(
+            f"[TgMediaToMatrix] Image and video bridging have been STOPPED (DISABLED) {scope_suffix(rooms)}.",
+            f"<strong>[TgMediaToMatrix]</strong> Image and video bridging have been <code>STOPPED</code> (DISABLED) {scope_suffix(rooms)}."
+        )
         return
 
-    # STATUS -> Admin or ALLOW_NON_ADMIN_STOP
+    # STATUS -> own room for authorized users, every room for the admin only
     if subcmd == "status":
-        status_plain = (
-            f"[TgMediaToMatrix] Current Status:\n"
-            f"- Images: {'ENABLED' if config.ENABLE_IMAGES else 'DISABLED'}\n"
-            f"- Videos: {'ENABLED' if config.ENABLE_VIDEOS else 'DISABLED'}\n"
-            f"- Oversized Videos: {config.OVERSIZED_VIDEO_ACTION.upper()} (Limit: {config.MAX_MEDIA_SIZE_MB}MB, Ceiling: {config.OVERSIZED_VIDEO_MAX_INPUT_MB}MB)\n"
-            f"- Alternate Renditions: {'ENABLED' if config.PREFER_ALTERNATE_RENDITION else 'DISABLED'}\n"
-            f"- Deduplication: {'ENABLED' if config.DEDUPLICATION_ENABLED else 'DISABLED'} (TTL: {config.DEDUPLICATION_TTL_MINUTES}m, Cache: {len(state.media_deduplicator._cache)}/{config.DEDUPLICATION_CACHE_SIZE})\n"
-            f"- Safety: {'ENABLED' if config.LLAMAGUARD_API_URL else 'DISABLED'} (Blocked: {state.SAFETY_STATS['blocked']}, Unavailable: {state.SAFETY_STATS['unavailable']})\n"
-            f"- Delivery: {state.DELIVERY_STATS['partial']} partial, {state.DELIVERY_STATS['failed']} failed (since start)"
-        )
-        status_html = (
-            f"<strong>[TgMediaToMatrix] Current Status:</strong><br/>"
-            f"• Images: <code>{'ENABLED' if config.ENABLE_IMAGES else 'DISABLED'}</code><br/>"
-            f"• Videos: <code>{'ENABLED' if config.ENABLE_VIDEOS else 'DISABLED'}</code><br/>"
-            f"• Oversized Videos: <code>{config.OVERSIZED_VIDEO_ACTION.upper()}</code> (Limit: {config.MAX_MEDIA_SIZE_MB}MB, Ceiling: {config.OVERSIZED_VIDEO_MAX_INPUT_MB}MB)<br/>"
-            f"• Alternate Renditions: <code>{'ENABLED' if config.PREFER_ALTERNATE_RENDITION else 'DISABLED'}</code><br/>"
-            f"• Deduplication: <code>{'ENABLED' if config.DEDUPLICATION_ENABLED else 'DISABLED'}</code> (TTL: {config.DEDUPLICATION_TTL_MINUTES}m, Cache: {len(state.media_deduplicator._cache)}/{config.DEDUPLICATION_CACHE_SIZE})<br/>"
-            f"• Safety: <code>{'ENABLED' if config.LLAMAGUARD_API_URL else 'DISABLED'}</code> (Blocked: {state.SAFETY_STATS['blocked']}, Unavailable: {state.SAFETY_STATS['unavailable']})<br/>"
-            f"• Delivery: {state.DELIVERY_STATS['partial']} partial, {state.DELIVERY_STATS['failed']} failed (since start)"
-        )
-        await matrix_io.send_matrix_notice(room.room_id, status_plain, status_html)
+        all_rooms, invalid = parse_scope(parts, 2)
+        if invalid is not None:
+            await refuse_scope(invalid, "!tmmb status [all]")
+            return
+        if all_rooms and not is_admin:
+            await refuse_non_admin("show the status of all rooms")
+            return
+
+        heading = "Current Status (all rooms)" if all_rooms else "Current Status (this room)"
+        plain_lines = [f"[TgMediaToMatrix] {heading}:"]
+        html_lines = [f"<strong>[TgMediaToMatrix] {heading}:</strong><br/>"]
+        for target_room in (config.MATRIX_ROOM_IDS if all_rooms else [room.room_id]):
+            room_plain, room_html = room_status_line(target_room, with_id=all_rooms)
+            plain_lines.append(f"- {room_plain}")
+            html_lines.append(f"• {room_html}<br/>")
+
+        plain_globals, html_globals = global_status_lines()
+        plain_lines.extend(plain_globals)
+        html_lines.extend(html_globals)
+        await notice("\n".join(plain_lines), "".join(html_lines))
         return
 
     # IMAGE COMMANDS
-    if len(parts) >= 3 and subcmd in ("image", "images"):
+    if subcmd in ("image", "images"):
+        if len(parts) < 3:
+            await refuse_scope(subcmd, "!tmmb image enable/disable [all]")
+            return
         action = parts[2].lower()
-        if action in ("enable", "on", "true", "1"):
-            if not is_admin:
-                logger.warning(f"[{room.room_id}] Unauthorized image enable attempt by non-admin '{event.sender}': '{body}'")
-                notice_plain = "[TgMediaToMatrix] Only the configured admin user can enable image bridging."
-                notice_html = "<strong>[TgMediaToMatrix]</strong> Only the configured admin user can enable image bridging."
-                await matrix_io.send_matrix_notice(room.room_id, notice_plain, notice_html)
-                return
+        all_rooms, invalid = parse_scope(parts, 3)
+        if invalid is not None:
+            await refuse_scope(invalid, f"!tmmb image {action} [all]")
+            return
 
-            config.ENABLE_IMAGES = True
-            logger.info(f"[{room.room_id}] User '{event.sender}' ENABLED image bridging.")
-            msg_plain = "[TgMediaToMatrix] Image bridging has been ENABLED."
-            msg_html = "<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>ENABLED</code>."
-            await matrix_io.send_matrix_notice(room.room_id, msg_plain, msg_html)
-        elif action in ("disable", "off", "false", "0"):
-            config.ENABLE_IMAGES = False
-            logger.info(f"[{room.room_id}] User '{event.sender}' DISABLED image bridging.")
-            msg_plain = "[TgMediaToMatrix] Image bridging has been DISABLED."
-            msg_html = "<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>DISABLED</code>."
-            await matrix_io.send_matrix_notice(room.room_id, msg_plain, msg_html)
+        if action in ENABLE_ACTIONS:
+            if not is_admin:
+                await refuse_non_admin("enable image bridging")
+                return
+            rooms = apply("images", True, all_rooms)
+            logger.info(f"[{room.room_id}] User '{event.sender}' ENABLED image bridging for {len(rooms)} room(s).")
+            await notice(
+                f"[TgMediaToMatrix] Image bridging has been ENABLED {scope_suffix(rooms)}.",
+                f"<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>ENABLED</code> {scope_suffix(rooms)}."
+            )
+        elif action in DISABLE_ACTIONS:
+            if all_rooms and not is_admin:
+                await refuse_non_admin("disable image bridging in all rooms")
+                return
+            rooms = apply("images", False, all_rooms)
+            logger.info(f"[{room.room_id}] User '{event.sender}' DISABLED image bridging for {len(rooms)} room(s).")
+            await notice(
+                f"[TgMediaToMatrix] Image bridging has been DISABLED {scope_suffix(rooms)}.",
+                f"<strong>[TgMediaToMatrix]</strong> Image bridging has been <code>DISABLED</code> {scope_suffix(rooms)}."
+            )
         else:
-            invalid_plain = f"[TgMediaToMatrix] Unknown action '{action}'. Use 'enable' or 'disable'."
-            invalid_html = f"<strong>[TgMediaToMatrix]</strong> Unknown action <code>{html.escape(action)}</code>. Use <code>enable</code> or <code>disable</code>."
-            await matrix_io.send_matrix_notice(room.room_id, invalid_plain, invalid_html)
+            await notice(
+                f"[TgMediaToMatrix] Unknown action '{action}'. Use 'enable' or 'disable'.",
+                f"<strong>[TgMediaToMatrix]</strong> Unknown action <code>{html.escape(action)}</code>. Use <code>enable</code> or <code>disable</code>."
+            )
         return
 
     # VIDEO COMMANDS
-    if len(parts) >= 3 and subcmd in ("video", "videos"):
+    if subcmd in ("video", "videos"):
+        if len(parts) < 3:
+            await refuse_scope(subcmd, "!tmmb video enable/disable [all]")
+            return
         action = parts[2].lower()
-        if action in ("enable", "on", "true", "1"):
-            if not is_admin:
-                logger.warning(f"[{room.room_id}] Unauthorized video enable attempt by non-admin '{event.sender}': '{body}'")
-                notice_plain = "[TgMediaToMatrix] Only the configured admin user can enable video bridging."
-                notice_html = "<strong>[TgMediaToMatrix]</strong> Only the configured admin user can enable video bridging."
-                await matrix_io.send_matrix_notice(room.room_id, notice_plain, notice_html)
-                return
+        all_rooms, invalid = parse_scope(parts, 3)
+        if invalid is not None:
+            await refuse_scope(invalid, f"!tmmb video {action} [all]")
+            return
 
-            config.ENABLE_VIDEOS = True
-            logger.info(f"[{room.room_id}] User '{event.sender}' ENABLED video bridging.")
-            msg_plain = "[TgMediaToMatrix] Video bridging has been ENABLED."
-            msg_html = "<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>ENABLED</code>."
-            await matrix_io.send_matrix_notice(room.room_id, msg_plain, msg_html)
-        elif action in ("disable", "off", "false", "0"):
-            config.ENABLE_VIDEOS = False
-            logger.info(f"[{room.room_id}] User '{event.sender}' DISABLED video bridging.")
-            msg_plain = "[TgMediaToMatrix] Video bridging has been DISABLED."
-            msg_html = "<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>DISABLED</code>."
-            await matrix_io.send_matrix_notice(room.room_id, msg_plain, msg_html)
+        if action in ENABLE_ACTIONS:
+            if not is_admin:
+                await refuse_non_admin("enable video bridging")
+                return
+            rooms = apply("videos", True, all_rooms)
+            logger.info(f"[{room.room_id}] User '{event.sender}' ENABLED video bridging for {len(rooms)} room(s).")
+            await notice(
+                f"[TgMediaToMatrix] Video bridging has been ENABLED {scope_suffix(rooms)}.",
+                f"<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>ENABLED</code> {scope_suffix(rooms)}."
+            )
+        elif action in DISABLE_ACTIONS:
+            if all_rooms and not is_admin:
+                await refuse_non_admin("disable video bridging in all rooms")
+                return
+            rooms = apply("videos", False, all_rooms)
+            logger.info(f"[{room.room_id}] User '{event.sender}' DISABLED video bridging for {len(rooms)} room(s).")
+            await notice(
+                f"[TgMediaToMatrix] Video bridging has been DISABLED {scope_suffix(rooms)}.",
+                f"<strong>[TgMediaToMatrix]</strong> Video bridging has been <code>DISABLED</code> {scope_suffix(rooms)}."
+            )
         else:
-            invalid_plain = f"[TgMediaToMatrix] Unknown action '{action}'. Use 'enable' or 'disable'."
-            invalid_html = f"<strong>[TgMediaToMatrix]</strong> Unknown action <code>{html.escape(action)}</code>. Use <code>enable</code> or <code>disable</code>."
-            await matrix_io.send_matrix_notice(room.room_id, invalid_plain, invalid_html)
+            await notice(
+                f"[TgMediaToMatrix] Unknown action '{action}'. Use 'enable' or 'disable'.",
+                f"<strong>[TgMediaToMatrix]</strong> Unknown action <code>{html.escape(action)}</code>. Use <code>enable</code> or <code>disable</code>."
+            )
         return
 
     unknown_plain = f"[TgMediaToMatrix] Unknown command '{body}'. Type '!tmmb help' for usage."
     unknown_html = f"<strong>[TgMediaToMatrix]</strong> Unknown command <code>{html.escape(body)}</code>. Type <code>!tmmb help</code> for usage."
-    await matrix_io.send_matrix_notice(room.room_id, unknown_plain, unknown_html)
-
+    await notice(unknown_plain, unknown_html)
