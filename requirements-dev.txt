@@ -53,7 +53,7 @@ propcache==0.5.4
     #   yarl
 pyaes==1.6.1
     # via telethon
-pyasn1==0.6.4
+pyasn1==0.6.5
     # via rsa
 pycryptodome==4.2.0
     # via matrix-nio
