@@ -44,6 +44,25 @@ class ModuleFacade:
 
     def __init__(self, modules):
         object.__setattr__(self, "_modules", modules)
+        # pytest 9.2's monkeypatch reads the previous value from the instance
+        # __dict__ instead of going through __getattr__. Keep a snapshot so its
+        # teardown restores the module globals via __setattr__ instead of trying
+        # to delete an attribute the facade itself never had.
+        for module in modules:
+            for name, value in vars(module).items():
+                if not name.startswith("__"):
+                    object.__setattr__(self, name, value)
+
+    def __getattribute__(self, name):
+        if name not in ("_modules", "__class__", "__dict__"):
+            try:
+                modules = object.__getattribute__(self, "_modules")
+            except AttributeError:
+                modules = ()
+            for module in modules:
+                if hasattr(module, name):
+                    return getattr(module, name)
+        return object.__getattribute__(self, name)
 
     def __getattr__(self, name):
         for module in object.__getattribute__(self, "_modules"):
