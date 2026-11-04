@@ -1,0 +1,58 @@
+# Dependabot keeps the three places fresh where versions would otherwise age silently:
+# the pinned Python dependencies, the digest-pinned base image, and the CI actions.
+# Grouping keeps the PR noise low; every PR still runs the normal CI before it is merged.
+# Dependency PRs land assigned to the maintainer so they are not lost in the notification stream.
+version: 2
+
+updates:
+  # requirements.txt and requirements-dev.txt in the repo root. Minor and patch bumps
+  # arrive as one grouped PR, majors arrive separately because they need a real review.
+  # Security advisories come as a single group instead of one PR per advisory.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    assignees: ["benjamin-aicheler"]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      python-security:
+        patterns: ["*"]
+        applies-to: "security-updates"
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+        applies-to: "version-updates"
+
+  # The base image is pinned by digest, so nothing moves without a deliberate bump.
+  # Dependabot surfaces that bump instead of leaving it to memory.
+  # Python series jumps stay ignored on purpose: 3.13 is supported until 2029 and the test
+  # suite only runs on 3.13, so a new series is a deliberate change (Dockerfile + ci.yml
+  # together), never a Dependabot merge. Patch-level digest updates inside 3.13 still come.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    assignees: ["benjamin-aicheler"]
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      - dependency-name: "python"
+        versions: [">= 3.14"]
+
+  # actions/checkout, setup-python, buildx and friends.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    assignees: ["benjamin-aicheler"]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      github-actions:
+        patterns: ["*"]
+        applies-to: "version-updates"
