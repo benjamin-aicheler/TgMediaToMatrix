@@ -1665,3 +1665,141 @@ def test_invalid_category_config_fails_at_startup():
 
     assert result.returncode != 0
     assert "LLAMAGUARD_CHECKS contains unknown Llama Guard categories ['S04']" in result.stderr
+
+
+# --- Forum topic resolution (issue #50) ----------------------------------------------
+#
+# Real Telethon reply headers and channel entities drive the real master_handler; only the
+# media pipeline and the topic-name lookup are replaced.
+
+FORUM_CHAT_ID = -1001234567890
+
+
+def forum_channel(forum=True, username="forumchan"):
+    from telethon.tl.types import Channel, ChatPhotoEmpty
+
+    return Channel(
+        id=1234567890, title="Forum Chan", photo=ChatPhotoEmpty(), date=None,
+        megagroup=True, forum=forum, username=username,
+    )
+
+
+def topic_post(topic_id):
+    from telethon.tl.types import MessageReplyHeader
+
+    return MessageReplyHeader(forum_topic=True, reply_to_msg_id=topic_id)
+
+
+def topic_reply(topic_id, replied_to):
+    from telethon.tl.types import MessageReplyHeader
+
+    return MessageReplyHeader(forum_topic=True, reply_to_msg_id=replied_to, reply_to_top_id=topic_id)
+
+
+def general_reply(replied_to):
+    from telethon.tl.types import MessageReplyHeader
+
+    return MessageReplyHeader(reply_to_msg_id=replied_to)
+
+
+@pytest.fixture
+def forum_handler(bridge, monkeypatch):
+    """Runs master_handler for one message; returns the display names it delivered."""
+    handler_module = sys.modules["handler"]
+    config_module = sys.modules["config"]
+    delivered = []
+    topic_lookups = []
+
+    async def fake_process(message, source_chat, channel_name, download_document=None):
+        delivered.append(channel_name)
+
+    async def fake_topic_name(client, chat_entity, topic_id):
+        topic_lookups.append(topic_id)
+        return {1: "General", 42: "Memes", 7: "Offtopic"}.get(topic_id, f"Topic {topic_id}")
+
+    monkeypatch.setattr(handler_module, "process_and_upload_media", fake_process)
+    monkeypatch.setattr(handler_module, "get_topic_name", fake_topic_name)
+
+    def deliver(reply_to, *, filters, unfiltered=(), chat=None, cached=True):
+        monkeypatch.setattr(config_module, "TG_TOPIC_FILTERS", filters)
+        monkeypatch.setattr(config_module, "TG_UNFILTERED_CHANNELS", set(unfiltered))
+        chat = forum_channel() if chat is None else chat
+
+        async def get_chat():
+            return chat
+
+        message = SimpleNamespace(
+            id=500, media=object(), reply_to=reply_to, grouped_id=None,
+            file=SimpleNamespace(size=1000, mime_type="image/jpeg"), video=None,
+        )
+        event = SimpleNamespace(
+            message=message, chat=chat if cached else None, chat_id=FORUM_CHAT_ID, get_chat=get_chat,
+        )
+        delivered.clear()
+        topic_lookups.clear()
+        run(bridge.master_handler(event))
+        return list(delivered)
+
+    deliver.topic_lookups = topic_lookups
+    return deliver
+
+
+BY_ID = {FORUM_CHAT_ID: {42}}
+BY_USERNAME = {"forumchan": {42}}
+
+
+@pytest.mark.parametrize("filters", [BY_ID, BY_USERNAME], ids=["numeric", "username"])
+def test_direct_post_and_nested_reply_in_allowed_topic_are_delivered(forum_handler, filters):
+    assert forum_handler(topic_post(42), filters=filters) == ["Forum Chan - Memes"]
+    # Nested reply: reply_to_msg_id is the replied-to message, reply_to_top_id the topic.
+    assert forum_handler(topic_reply(42, replied_to=201), filters=filters) == ["Forum Chan - Memes"]
+
+
+@pytest.mark.parametrize("filters", [BY_ID, BY_USERNAME], ids=["numeric", "username"])
+def test_messages_from_other_topics_stay_rejected(forum_handler, filters):
+    assert forum_handler(topic_post(7), filters=filters) == []
+    assert forum_handler(topic_reply(7, replied_to=42), filters=filters) == []
+
+
+@pytest.mark.parametrize("reply_to", [None, general_reply(300)], ids=["plain", "reply"])
+@pytest.mark.parametrize(
+    "filters",
+    [{FORUM_CHAT_ID: {1}}, {"forumchan": {1}}],
+    ids=["numeric", "username"],
+)
+def test_general_topic_matches_topic_one(forum_handler, filters, reply_to):
+    assert forum_handler(reply_to, filters=filters) == ["Forum Chan - General"]
+
+
+def test_general_topic_is_rejected_by_another_topic_filter(forum_handler):
+    assert forum_handler(None, filters=BY_ID) == []
+    assert forum_handler(general_reply(300), filters=BY_ID) == []
+
+
+def test_general_topic_is_resolved_when_the_chat_is_not_cached(forum_handler):
+    assert forum_handler(None, filters={"forumchan": {1}}, cached=False) == ["Forum Chan - General"]
+
+
+def test_non_forum_channel_gets_no_topic(forum_handler):
+    plain = forum_channel(forum=False)
+    assert forum_handler(None, filters={}, unfiltered={FORUM_CHAT_ID}, chat=plain) == ["Forum Chan"]
+    assert forum_handler.topic_lookups == []
+    # A topic filter on a chat that is not a forum still matches nothing, as before.
+    assert forum_handler(general_reply(300), filters={FORUM_CHAT_ID: {1}}, chat=plain) == []
+
+
+def test_unfiltered_forum_forwards_every_topic(forum_handler):
+    unfiltered = {FORUM_CHAT_ID}
+    assert forum_handler(topic_reply(7, replied_to=9), filters={}, unfiltered=unfiltered) == ["Forum Chan - Offtopic"]
+    assert forum_handler(None, filters={}, unfiltered=unfiltered) == ["Forum Chan - General"]
+
+
+def test_resolve_topic_id_prefers_the_thread_top(bridge):
+    from telethon.tl.types import PeerChannel
+
+    # A reply to a message in another chat: reply_to_msg_id belongs to that chat.
+    foreign = topic_reply(42, replied_to=99999)
+    foreign.reply_to_peer_id = PeerChannel(555)
+    message = SimpleNamespace(reply_to=foreign)
+    assert bridge.resolve_topic_id(message, forum_channel()) == 42
+    assert bridge.resolve_topic_id(SimpleNamespace(reply_to=None), None) is None

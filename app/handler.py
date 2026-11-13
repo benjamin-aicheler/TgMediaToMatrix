@@ -75,6 +75,29 @@ def is_channel_and_topic_allowed(chat_id, chat_entity, topic_id=None):
 
     return True
 
+# Telegram's General topic always has ID 1; its messages carry no forum reply header.
+GENERAL_TOPIC_ID = 1
+
+
+def resolve_topic_id(message, chat_entity) -> int | None:
+    """Returns the forum topic a message belongs to, or None outside forums.
+
+    In a messageReplyHeader with forum_topic set, reply_to_top_id is the topic when the
+    message replies to another message inside the topic; reply_to_msg_id is then the
+    replied-to message (possibly in another chat). A post directly in the topic has no
+    top_id and its reply_to_msg_id is the topic itself. Messages in the General topic carry
+    no forum_topic flag at all, so a message in a forum without one belongs to topic 1.
+    See https://core.telegram.org/api/forum.
+    """
+    reply_to = getattr(message, 'reply_to', None)
+    if reply_to is not None and getattr(reply_to, 'forum_topic', False):
+        top_id = getattr(reply_to, 'reply_to_top_id', None)
+        return top_id or getattr(reply_to, 'reply_to_msg_id', None)
+    if getattr(chat_entity, 'forum', False):
+        return GENERAL_TOPIC_ID
+    return None
+
+
 async def get_topic_name(client, chat_entity, topic_id):
     if not topic_id:
         return None
@@ -482,27 +505,33 @@ async def master_handler(event):
     if not event.message.media:
         return
 
+    # event.chat is None when Telethon has not cached the entity yet. Without it neither a
+    # username filter nor the General topic (which needs chat.forum) could be resolved.
+    chat = event.chat
+    if chat is None:
+        try:
+            chat = await event.get_chat()
+        except Exception as e:  # noqa: BLE001 - Telethon RPC errors share no narrow base; filter on the ID alone
+            logger.debug(f"[{event.chat_id}] Could not load the chat entity: {e}")
+
     # Check for topic / thread details (subchannels in forums)
-    topic_id = None
-    if (hasattr(event.message, 'reply_to') and event.message.reply_to
-            and hasattr(event.message.reply_to, 'forum_topic') and event.message.reply_to.forum_topic):
-        topic_id = getattr(event.message.reply_to, 'reply_to_msg_id', None)
+    topic_id = resolve_topic_id(event.message, chat)
 
     # Validate channel / topic filter match
-    if not is_channel_and_topic_allowed(event.chat_id, event.chat, topic_id):
+    if not is_channel_and_topic_allowed(event.chat_id, chat, topic_id):
         return
 
     # Extract clean display name for channel and topic
     channel_name = str(event.chat_id)
-    if hasattr(event, 'chat') and event.chat:
-        if hasattr(event.chat, 'title') and event.chat.title:
-            channel_name = event.chat.title
-        elif hasattr(event.chat, 'username') and event.chat.username:
-            channel_name = event.chat.username
+    if chat:
+        if getattr(chat, 'title', None):
+            channel_name = chat.title
+        elif getattr(chat, 'username', None):
+            channel_name = chat.username
 
     topic_name = None
-    if topic_id:
-        topic_name = await get_topic_name(state.tg_client, event.chat, topic_id)
+    if topic_id and chat is not None:
+        topic_name = await get_topic_name(state.tg_client, chat, topic_id)
 
     channel_display = channel_name
     if topic_name:
