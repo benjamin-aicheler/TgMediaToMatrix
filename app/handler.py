@@ -216,6 +216,10 @@ async def process_and_upload_media(message, source_chat, channel_name, download_
     content_key = f"sha256_{content_hash}"
     if state.media_deduplicator.is_duplicate(content_key):
         logger.info(f"[{source_chat}] Skipping duplicate media {filename}: Content hash ({content_hash[:12]}...) was already forwarded within {config.DEDUPLICATION_TTL_MINUTES}m.")
+        # This media ID was only skipped because of the content mark, which may belong to an
+        # attempt still in flight. Tie the ID to that mark: if that attempt fails and releases
+        # the mark, this ID is released with it instead of blocking a repost for the TTL.
+        state.media_deduplicator.add_alias(content_key, tg_media_id)
         return
     state.media_deduplicator.mark_seen(content_key)
 

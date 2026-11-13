@@ -30,25 +30,38 @@ def album_already_processed(album_id) -> bool:
 
 
 class MediaDeduplicator:
-    """In-memory deduplication cache with TTL and maximum size limit."""
+    """In-memory deduplication cache with TTL and maximum size limit.
+
+    A key can carry aliases: other keys that were skipped only because this key was already
+    marked (another Telegram media ID whose bytes hash to an in-flight content key). Aliases
+    share the outcome of the key they point to: unmarking the key after a technical failure
+    releases them too, while a key that stays marked (delivered or deliberately blocked)
+    keeps them marked, so later reposts are suppressed without another download.
+    """
 
     def __init__(self, enabled: bool = True, ttl_minutes: int = 15, max_size: int = 2000):
         self.enabled = enabled
         self.ttl_seconds = ttl_minutes * 60
         self.max_size = max_size
         self._cache = OrderedDict()  # key -> float (timestamp)
+        self._aliases = {}  # key -> set of alias keys; lives exactly as long as the key's entry
+
+    def _evict(self, key: str):
+        self._cache.pop(key, None)
+        # The aliases expire on their own TTL; only the link to them goes away.
+        self._aliases.pop(key, None)
 
     def _cleanup(self, now: float):
         # Evict expired entries from the left (oldest inserted)
         while self._cache:
-            oldest_ts = next(iter(self._cache.values()))
+            oldest_key, oldest_ts = next(iter(self._cache.items()))
             if now - oldest_ts > self.ttl_seconds:
-                self._cache.popitem(last=False)
+                self._evict(oldest_key)
             else:
                 break
         # Evict oldest entries if capacity exceeded
         while len(self._cache) > self.max_size:
-            self._cache.popitem(last=False)
+            self._evict(next(iter(self._cache)))
 
     def is_duplicate(self, key: str | None) -> bool:
         if not self.enabled or not key:
@@ -58,7 +71,7 @@ class MediaDeduplicator:
             if now - self._cache[key] <= self.ttl_seconds:
                 return True
             else:
-                del self._cache[key]
+                self._evict(key)
         return False
 
     def mark_seen(self, key: str | None):
@@ -69,10 +82,18 @@ class MediaDeduplicator:
         self._cache.move_to_end(key)
         self._cleanup(now)
 
+    def add_alias(self, key: str | None, alias: str | None):
+        """Ties an already marked alias to key, so it is released together with key."""
+        if not self.enabled or not key or not alias or alias == key or key not in self._cache:
+            return
+        self._aliases.setdefault(key, set()).add(alias)
+
     def unmark(self, key: str | None):
         if not self.enabled or not key:
             return
         self._cache.pop(key, None)
+        for alias in self._aliases.pop(key, ()):
+            self.unmark(alias)
 
 
 media_deduplicator = MediaDeduplicator(
