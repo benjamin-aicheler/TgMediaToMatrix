@@ -2197,3 +2197,127 @@ def test_real_compression_respects_the_bounds(bridge, monkeypatch, tmp_path, siz
 
     assert result is not None
     assert (result["w"], result["h"]) == expected
+
+
+# --- Contiguous split parts (issue #54) ----------------------------------------------
+
+SPLIT_ROOMS = ["!a:test.invalid", "!b:test.invalid"]
+
+
+class SequencingMatrixClient:
+    """Records (room, body) per room send; can hold one upload or one room send."""
+
+    def __init__(self, hold_upload=None, hold_send_body=None, fail_upload=None):
+        self.hold_upload = hold_upload
+        self.hold_send_body = hold_send_body
+        self.fail_upload = fail_upload
+        self.held = asyncio.Event()
+        self.release = asyncio.Event()
+        self.sent = []
+
+    async def upload(self, stream, content_type=None, filename=None, filesize=None):
+        if filename == self.hold_upload:
+            self.held.set()
+            await self.release.wait()
+        if filename == self.fail_upload:
+            return object(), {}
+        return nio.UploadResponse(content_uri=f"mxc://test.invalid/{filename}"), {}
+
+    async def room_send(self, room_id, message_type, content=None):
+        body = content["body"]
+        if self.hold_send_body and body.startswith(self.hold_send_body) and not self.release.is_set():
+            self.held.set()
+            await self.release.wait()
+        self.sent.append((room_id, body))
+        return nio.RoomSendResponse(event_id=f"${len(self.sent)}", room_id=room_id)
+
+
+def bodies_in(client, room):
+    return [body for r, body in client.sent if r == room]
+
+
+def assert_parts_contiguous(client, total):
+    for room in SPLIT_ROOMS:
+        bodies = bodies_in(client, room)
+        positions = [i for i, body in enumerate(bodies) if body.startswith("Part ")]
+        assert [bodies[i].split(" •")[0] for i in positions] == [f"Part {n}/{total}" for n in range(1, total + 1)]
+        assert positions == list(range(positions[0], positions[0] + total)), bodies
+
+
+def start_split(bridge, monkeypatch, client, data, total=3):
+    parts = [split_part(i, total, None) for i in range(1, total + 1)]
+    prepare_split(bridge, monkeypatch, parts)
+    monkeypatch.setattr(bridge, "matrix_client", client)
+    monkeypatch.setattr(bridge, "MATRIX_ROOM_IDS", SPLIT_ROOMS)
+    return asyncio.create_task(bridge.process_and_upload_media(FakeVideoMessage(data), "chat", "chan"))
+
+
+async def other_image(bridge, name):
+    return await bridge.send_matrix_media_event(
+        b"img", "image/jpeg", name, "m.image", {"w": 1, "h": 1}, "other-chat", "Other Chat"
+    )
+
+
+def test_events_sent_during_part_uploads_land_before_the_parts(bridge, monkeypatch):
+    async def scenario():
+        client = SequencingMatrixClient(hold_upload="clip_part2_of_3.mp4")
+        split = start_split(bridge, monkeypatch, client, b"u" * 2000)
+        await client.held.wait()
+        # Part 1 is uploaded, part 2 is still uploading: nothing may be posted yet.
+        assert not [body for _, body in client.sent if body.startswith("Part ")]
+        await other_image(bridge, "other.jpg")
+        await bridge.send_matrix_notice(SPLIT_ROOMS[0], "status", "<b>status</b>")
+        client.release.set()
+        await split
+        return client
+
+    client = run(scenario())
+    assert_parts_contiguous(client, 3)
+    assert bodies_in(client, SPLIT_ROOMS[0])[:2] == ["1x1 3 B", "status"]
+
+
+def test_events_sent_while_parts_are_posted_wait_for_the_whole_set(bridge, monkeypatch):
+    async def scenario():
+        client = SequencingMatrixClient(hold_send_body="Part 2/3")
+        split = start_split(bridge, monkeypatch, client, b"w" * 2000)
+        await client.held.wait()  # posting has started and is held at part 2
+        image = asyncio.create_task(other_image(bridge, "other.jpg"))
+        notice = asyncio.create_task(bridge.send_matrix_notice(SPLIT_ROOMS[0], "status", "<b>status</b>"))
+        await asyncio.sleep(0.05)  # both are uploaded and now wait for the lock
+        client.release.set()
+        await asyncio.gather(split, image, notice)
+        return client
+
+    client = run(scenario())
+    assert_parts_contiguous(client, 3)
+    for room in SPLIT_ROOMS:
+        assert [body.split(" •")[0] for body in bodies_in(client, room)][:3] == ["Part 1/3", "Part 2/3", "Part 3/3"]
+
+
+def test_failed_part_upload_posts_no_part(bridge, monkeypatch):
+    data = b"f" * 2000
+    client = SequencingMatrixClient(fail_upload="clip_part2_of_3.mp4")
+
+    async def scenario():
+        await start_split(bridge, monkeypatch, client, data)
+
+    run(scenario())
+
+    assert client.sent == []
+    assert bridge.DELIVERY_STATS["failed"] == 1
+    assert bridge.media_deduplicator.is_duplicate(f"sha256_{bridge.compute_sha256(data)}") is False
+
+
+def test_toggle_flipping_mid_split_does_not_split_the_set(bridge, monkeypatch):
+    async def scenario():
+        client = SequencingMatrixClient(hold_upload="clip_part2_of_3.mp4")
+        split = start_split(bridge, monkeypatch, client, b"g" * 2000)
+        await client.held.wait()
+        bridge.room_toggles.set(SPLIT_ROOMS[1], "videos", False)
+        client.release.set()
+        await split
+        return client
+
+    client = run(scenario())
+    # The rooms were fixed when the split started, so room B gets the complete set too.
+    assert_parts_contiguous(client, 3)
