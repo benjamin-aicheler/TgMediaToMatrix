@@ -9,6 +9,7 @@ import importlib.util
 import logging
 import shutil
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import nio
@@ -267,6 +268,153 @@ def test_video_frame_is_always_jpeg(bridge, monkeypatch):
 
     run(bridge.check_media_safety(b"mp4-bytes", "video/mp4", "chat", "a.mp4"))
     assert seen["mime"] == "image/jpeg"
+
+
+# --- Frame extraction failures (issue #47) -------------------------------------------
+#
+# The suite runs without PyAV and Pillow, so a stand-in `av` module replaces the decoder.
+# It decodes `good_frames` frames and then raises, like PyAV does on a corrupted packet.
+
+
+class FakeDecoderError(Exception):
+    """Stands in for av.error.InvalidDataError."""
+
+
+class FakeImage:
+    def __init__(self, index):
+        self.index = index
+
+    def save(self, buf, format):
+        buf.write(f"jpeg-{self.index}".encode())
+
+
+class FakeFrame:
+    def __init__(self, index):
+        self.index = index
+
+    def to_image(self):
+        return FakeImage(self.index)
+
+
+class FakeContainer:
+    def __init__(self, total_frames, good_frames):
+        self.total_frames = total_frames
+        self.good_frames = good_frames
+        stream = SimpleNamespace(frames=total_frames, duration=None, time_base=None, average_rate=None)
+        self.streams = SimpleNamespace(video=[stream])
+        self.closed = False
+
+    def decode(self, video=0):
+        for i in range(self.total_frames):
+            if self.good_frames is not None and i >= self.good_frames:
+                raise FakeDecoderError("Invalid data found when processing input")
+            yield FakeFrame(i)
+
+    def seek(self, offset):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_av(monkeypatch):
+    """Installs a stand-in `av` module; returns a function that configures the next clip."""
+    containers = []
+
+    def configure(total_frames, good_frames=None):
+        container = FakeContainer(total_frames, good_frames)
+        containers.append(container)
+        return container
+
+    fake_module = SimpleNamespace(open=lambda _buf: containers[-1])
+    monkeypatch.setitem(sys.modules, "av", fake_module)
+
+    real_find_spec = importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "PIL":
+            return object()
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    return configure
+
+
+@pytest.mark.parametrize("total_frames", [0, 10], ids=["unknown-length", "indexed"])
+def test_decoder_failure_after_partial_extraction_discards_frames(bridge, fake_av, total_frames):
+    # total_frames=0 takes the "decode the first frames" path; 10 takes the indexed sampling
+    # path. In both, two frames decode before the decoder raises.
+    container = fake_av(total_frames=total_frames or 10, good_frames=2)
+    container.streams.video[0].frames = total_frames
+
+    frames = bridge.extract_video_frames(b"damaged", max_frames=5, use_random=False)
+
+    assert frames == []
+    assert container.closed
+
+
+def test_clean_video_sampling_still_succeeds(bridge, fake_av):
+    fake_av(total_frames=10)
+    frames = bridge.extract_video_frames(b"clean", max_frames=5, use_random=False)
+    assert len(frames) == 5
+
+
+def test_clean_video_shorter_than_sample_count_still_succeeds(bridge, fake_av):
+    fake_av(total_frames=3)
+    frames = bridge.extract_video_frames(b"short", max_frames=5, use_random=False)
+    assert frames == [b"jpeg-0", b"jpeg-1", b"jpeg-2"]
+
+
+def test_partial_extraction_is_unavailable_never_safe(bridge, fake_av, monkeypatch):
+    async def safe_classifier(*args, **kwargs):
+        return True, []
+
+    fake_av(total_frames=10, good_frames=2)
+    monkeypatch.setattr(bridge, "LLAMAGUARD_API_URL", "https://guard.test.invalid/v1")
+    monkeypatch.setattr(bridge, "get_image_safety_classification", safe_classifier)
+
+    verdict = run(bridge.check_media_safety(b"damaged", "video/mp4", "chat", "a.mp4"))
+    assert verdict is bridge.SafetyVerdict.UNAVAILABLE
+
+
+def test_partial_extraction_sends_nothing_and_releases_dedup_marks(bridge, fake_av, monkeypatch):
+    async def safe_classifier(*args, **kwargs):
+        return True, []
+
+    class NoSendClient:
+        async def upload(self, *args, **kwargs):
+            raise AssertionError("nothing may be uploaded for an unclassified video")
+
+        async def room_send(self, *args, **kwargs):
+            raise AssertionError("no Matrix event may be sent for an unclassified video")
+
+    video_bytes = b"damaged-video-issue-47"
+
+    async def download_media(file=None):
+        return video_bytes
+
+    message = SimpleNamespace(
+        id=4747,
+        photo=None,
+        video=SimpleNamespace(),
+        document=SimpleNamespace(id=474747),
+        file=SimpleNamespace(mime_type="video/mp4", name="damaged.mp4", size=len(video_bytes)),
+        download_media=download_media,
+    )
+
+    fake_av(total_frames=10, good_frames=2)
+    monkeypatch.setattr(bridge, "LLAMAGUARD_API_URL", "https://guard.test.invalid/v1")
+    monkeypatch.setattr(bridge, "ENABLE_VIDEOS", True)
+    monkeypatch.setattr(bridge, "get_image_safety_classification", safe_classifier)
+    monkeypatch.setattr(bridge, "matrix_client", NoSendClient())
+
+    run(bridge.process_and_upload_media(message, "chat", "chan"))
+
+    assert bridge.SAFETY_STATS == {"blocked": 0, "unavailable": 1}
+    content_key = f"sha256_{bridge.compute_sha256(video_bytes)}"
+    assert bridge.media_deduplicator.is_duplicate("tg_doc_474747") is False
+    assert bridge.media_deduplicator.is_duplicate(content_key) is False
 
 
 # --- Delivery semantics --------------------------------------------------------------
