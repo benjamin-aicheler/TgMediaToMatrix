@@ -345,7 +345,15 @@ async def process_and_upload_media(message, source_chat, channel_name, download_
                 known_duration=orig_duration
             )
             if parts:
-                upload_failed = False
+                # The parts must appear in each room with nothing in between, so everything
+                # is uploaded first and the events are posted back to back afterwards. The
+                # target rooms are fixed once, so a toggle flipping mid-way cannot split a set.
+                target_rooms = state.room_toggles.enabled_rooms(state.media_kind(mime_type))
+                if not target_rooms:
+                    logger.info(f"[{source_chat}] {filename} not uploaded: no room has videos enabled right now.")
+                    return
+
+                prepared_parts = []
                 for p in parts:
                     part_info = {
                         "size": p["size"],
@@ -388,7 +396,7 @@ async def process_and_upload_media(message, source_chat, channel_name, download_
                         part_info["thumbnail_url"] = part_thumb_url
                         part_info["thumbnail_info"] = part_thumb_info
 
-                    sent = await matrix_io.send_matrix_media_event(
+                    prepared = await matrix_io.upload_matrix_media(
                         media_bytes=p["bytes"],
                         mime_type=mime_type,
                         filename=p["filename"],
@@ -399,9 +407,20 @@ async def process_and_upload_media(message, source_chat, channel_name, download_
                         caption_prefix=f"Part {p['part_index']}/{p['total_parts']}",
                         blurhash_str=part_blurhash
                     )
-                    if not sent:
-                        upload_failed = True
-                if upload_failed:
+                    if prepared is None:
+                        # Posting the other parts would leave a gap that a repost then fills
+                        # with duplicates, so the split is sent completely or not at all.
+                        state.DELIVERY_STATS["failed"] += 1
+                        logger.warning(
+                            f"[{source_chat}] Upload of split part {p['part_index']}/{p['total_parts']} failed; "
+                            f"posting no part and releasing deduplication marks so a repost can be retried."
+                        )
+                        release_dedup_marks()
+                        return
+                    prepared_parts.append(prepared)
+
+                results = await matrix_io.post_media_sequence(prepared_parts, target_rooms, source_chat)
+                if not all(results):
                     logger.warning(
                         f"[{source_chat}] At least one split part failed to reach Matrix; "
                         f"releasing deduplication marks so a repost can be retried."

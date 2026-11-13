@@ -1,5 +1,6 @@
 """Mutable runtime state: caches, counters, toggle flags and the API clients."""
 
+import asyncio
 import logging
 import os
 import time
@@ -159,6 +160,11 @@ SAFETY_STATS = {"blocked": 0, "unavailable": 0}
 
 # Counters for media that did not reach (all|some) destination rooms, also shown by "!tmmb status".
 DELIVERY_STATS = {"failed": 0, "partial": 0}
+
+# Held around every room send. The parts of a split video are posted in one go under it,
+# so no other bridge event (media from any chat, a notice) lands between them. Uploads
+# happen outside the lock.
+ROOM_SEND_LOCK = asyncio.Lock()
 
 
 SESSION_PATH = "session/tgmabr"
