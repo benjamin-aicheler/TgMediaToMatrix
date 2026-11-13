@@ -28,25 +28,72 @@ MATRIX_SYNC_STABLE_SECONDS = 60
 # Set once the homeserver rejected our access token; retrying cannot fix that.
 MATRIX_SYNC_AUTH_FAILED = False
 
+# Set when sync_forever was stopped because of a sync error, so the supervisor knows the
+# return was deliberate and backs off before restarting.
+MATRIX_SYNC_ERROR_STOP = False
+
+# nio's ErrorResponse.from_dict() stores the Matrix errcode in status_code (never the HTTP
+# status) and the human-readable text in message. The errcode is what identifies the error.
+MATRIX_AUTH_ERRCODES = frozenset({"M_UNKNOWN_TOKEN", "M_MISSING_TOKEN"})
+MATRIX_RATE_LIMIT_ERRCODE = "M_LIMIT_EXCEEDED"
+
+
+def _http_status(response) -> int | None:
+    """HTTP status of the underlying transport response, if nio kept one."""
+    return getattr(getattr(response, "transport_response", None), "status", None)
+
+
+def classify_sync_error(response) -> str:
+    """Returns 'auth', 'rate_limited' or 'transient' for a SyncError."""
+    errcode = response.status_code
+    http_status = _http_status(response)
+    if (
+        errcode in MATRIX_AUTH_ERRCODES
+        or getattr(response, "soft_logout", False)
+        # A proxy answering 401 with an HTML page leaves no errcode behind (nio parses the
+        # body to {} and reports "unknown error"); the HTTP status still identifies it.
+        or http_status == 401
+    ):
+        return "auth"
+    if errcode == MATRIX_RATE_LIMIT_ERRCODE or http_status == 429:
+        return "rate_limited"
+    return "transient"
+
+
+def _describe_sync_error(response) -> str:
+    http_status = _http_status(response)
+    parts = [str(response.status_code or "no errcode")]
+    if http_status is not None:
+        parts.append(f"HTTP {http_status}")
+    parts.append(str(response.message or "").strip() or "no message")
+    return ", ".join(parts)
+
 
 async def on_matrix_response(response):
-    """Surface sync errors and stop the loop when the access token is no longer accepted."""
-    global MATRIX_SYNC_AUTH_FAILED
+    """Surface sync errors; stop the loop for a rejected token or a failed sync.
+
+    nio's sync_forever() does not pause after an error response: without loop_sleep_time it
+    calls /sync again immediately. Every error therefore has to leave the loop here, or a
+    persistent failure turns into a tight request loop and a log line per iteration.
+    """
+    global MATRIX_SYNC_AUTH_FAILED, MATRIX_SYNC_ERROR_STOP
 
     if not isinstance(response, SyncError):
         return
 
-    status = str(response.status_code or "")
-    message = str(response.message or "")
-    is_auth_error = (
-        status in ("401", "403")
-        or "M_UNKNOWN_TOKEN" in message
-        or "M_MISSING_TOKEN" in message
-        or getattr(response, "soft_logout", False)
-    )
+    kind = classify_sync_error(response)
+    description = _describe_sync_error(response)
 
-    if not is_auth_error:
-        logger.error(f"Matrix sync error: {status} {message}".strip())
+    if kind == "rate_limited":
+        # nio's _send() already sleeps retry_after_ms and retries the same request; it only
+        # hands us the response for information. Stopping here would add a needless restart.
+        logger.debug(f"Matrix sync rate-limited ({description}); nio retries after the requested delay.")
+        return
+
+    if kind == "transient":
+        logger.error(f"Matrix sync error ({description}). Restarting the sync after a backoff.")
+        MATRIX_SYNC_ERROR_STOP = True
+        state.matrix_client.stop_sync_forever()
         return
 
     if MATRIX_SYNC_AUTH_FAILED:
@@ -54,19 +101,24 @@ async def on_matrix_response(response):
 
     MATRIX_SYNC_AUTH_FAILED = True
     logger.critical(
-        f"Matrix rejected the access token ({status} {message}). Interactive commands stay "
+        f"Matrix rejected the access token ({description}). Interactive commands stay "
         f"disabled until MATRIX_ACCESS_TOKEN is replaced and the bridge is restarted."
     )
-    # Without this, sync_forever would keep polling a server that answers 401 as fast as it can.
+    # Retrying cannot fix a rejected token, so the supervisor stops for good.
     state.matrix_client.stop_sync_forever()
 
 
 async def matrix_sync_loop():
-    """Run sync_forever, restarting it with exponential backoff after a failure."""
+    """Run sync_forever, restarting it with exponential backoff after a failure.
+
+    A restart resumes from the client's next_batch token, so no events are lost.
+    """
+    global MATRIX_SYNC_ERROR_STOP
     backoff = MATRIX_SYNC_INITIAL_BACKOFF_SECONDS
 
     while True:
         started = time.monotonic()
+        MATRIX_SYNC_ERROR_STOP = False
         try:
             await state.matrix_client.sync_forever(timeout=30000, full_state=False)
         except asyncio.CancelledError:
@@ -77,7 +129,8 @@ async def matrix_sync_loop():
             if MATRIX_SYNC_AUTH_FAILED:
                 logger.error("Matrix sync supervisor stopping: the access token was rejected.")
                 return
-            logger.warning("Matrix sync loop returned unexpectedly.")
+            if not MATRIX_SYNC_ERROR_STOP:
+                logger.warning("Matrix sync loop returned unexpectedly.")
 
         ran_for = time.monotonic() - started
         if ran_for >= MATRIX_SYNC_STABLE_SECONDS:
