@@ -6,6 +6,7 @@ covered by hand on the real container instead.
 
 import asyncio
 import importlib.util
+import json
 import logging
 import shutil
 import subprocess
@@ -414,6 +415,187 @@ def test_partial_extraction_sends_nothing_and_releases_dedup_marks(bridge, fake_
     assert bridge.SAFETY_STATS == {"blocked": 0, "unavailable": 1}
     content_key = f"sha256_{bridge.compute_sha256(video_bytes)}"
     assert bridge.media_deduplicator.is_duplicate("tg_doc_474747") is False
+    assert bridge.media_deduplicator.is_duplicate(content_key) is False
+
+
+# --- Classifier response parsing (issue #48) -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("safe", (True, [])),
+        ("Safe", (True, [])),
+        ("unsafe\nS4", (False, ["S4"])),
+        ("unsafe\nS1,S10", (False, ["S1", "S10"])),
+        ("unsafe\nS1, S10", (False, ["S1", "S10"])),
+        ("unsafe\nS4; S12", (False, ["S4", "S12"])),
+        ("unsafe\nS4.", (False, ["S4"])),
+        ("unsafe\nS12, S4.", (False, ["S12", "S4"])),
+        ("unsafe s4", (False, ["S4"])),
+        ("unsafe\nS4,S4", (False, ["S4"])),
+    ],
+)
+def test_parse_classification_accepts_complete_responses(bridge, text, expected):
+    assert bridge.parse_classification(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "unsafe",
+        "unsafe\n.",
+        "unsafe\nS15",
+        "unsafe\nS0",
+        "unsafe\nS4: Child Sexual Exploitation",
+        "unsafe\nS12 S4?",
+        "unsafe\nS4..",
+        "unsafe\nS12, and S4",
+        "safe\nS4",
+        "unknown\nS4",
+    ],
+)
+def test_parse_classification_rejects_incomplete_responses(bridge, text):
+    with pytest.raises(bridge.ClassificationParseError):
+        bridge.parse_classification(text)
+
+
+class FakeGuardResponse:
+    def __init__(self, content):
+        self.body = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self.body
+
+
+@pytest.fixture
+def guard_replies(bridge, monkeypatch):
+    """Replaces only the HTTP call; returns a function that sets the replies, one per call."""
+    import urllib.request
+
+    replies = []
+
+    def urlopen(request, timeout=None):
+        return FakeGuardResponse(replies.pop(0))
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(bridge, "LLAMAGUARD_API_URL", "https://guard.test.invalid/v1")
+
+    def set_replies(*contents):
+        replies[:] = list(contents)
+
+    return set_replies
+
+
+@pytest.mark.parametrize(
+    "reply, expected",
+    [
+        # The issue's reproductions: a missing or dropped S4 used to come back SAFE.
+        ("unsafe", "UNAVAILABLE"),
+        ("unsafe\nS4.", "BLOCKED"),
+        ("unsafe\nS4; S12", "BLOCKED"),
+        ("unsafe\nS4: Child Sexual Exploitation", "UNAVAILABLE"),
+        ("unsafe\nS15", "UNAVAILABLE"),
+        # A complete response outside the block list still follows the selective policy.
+        ("unsafe\nS12", "SAFE"),
+        ("unsafe\nS4", "BLOCKED"),
+        ("safe", "SAFE"),
+    ],
+)
+def test_image_block_list_verdicts(bridge, guard_replies, monkeypatch, reply, expected):
+    monkeypatch.setattr(bridge, "LLAMAGUARD_CHECKS", {"S4"})
+    guard_replies(reply)
+    verdict = run(bridge.check_media_safety(b"img", "image/jpeg", "chat", "a.jpg"))
+    assert verdict is bridge.SafetyVerdict[expected]
+
+
+@pytest.mark.parametrize(
+    "reply, expected",
+    [
+        # README example (require S12, block S4): S4 must never be lost behind S12.
+        ("unsafe\nS12, S4.", "BLOCKED"),
+        ("unsafe\nS4; S12", "BLOCKED"),
+        ("unsafe\nS12 S4?", "UNAVAILABLE"),
+        ("unsafe\nS12", "SAFE"),
+        ("unsafe", "UNAVAILABLE"),
+        ("safe", "BLOCKED"),
+    ],
+)
+def test_image_whitelist_verdicts(bridge, guard_replies, monkeypatch, reply, expected):
+    monkeypatch.setattr(bridge, "LLAMAGUARD_CHECKS", {"S4"})
+    monkeypatch.setattr(bridge, "LLAMAGUARD_REQUIRE_CHECKS", {"S12"})
+    guard_replies(reply)
+    verdict = run(bridge.check_media_safety(b"img", "image/jpeg", "chat", "a.jpg"))
+    assert verdict is bridge.SafetyVerdict[expected]
+
+
+def test_unsafe_without_category_still_blocks_by_default(bridge, guard_replies):
+    """With both lists empty, any complete 'unsafe' blocks; an incomplete one is unavailable."""
+    guard_replies("unsafe\nS12")
+    assert run(bridge.check_media_safety(b"img", "image/jpeg", "chat", "a.jpg")) is bridge.SafetyVerdict.BLOCKED
+    guard_replies("unsafe")
+    assert run(bridge.check_media_safety(b"img", "image/jpeg", "chat", "a.jpg")) is bridge.SafetyVerdict.UNAVAILABLE
+
+
+@pytest.mark.parametrize("require", [set(), {"S12"}], ids=["block-list", "whitelist"])
+def test_video_with_one_incomplete_frame_is_unavailable(bridge, guard_replies, monkeypatch, require):
+    # The other frame alone would pass (block-list) or satisfy the whitelist.
+    monkeypatch.setattr(bridge, "LLAMAGUARD_CHECKS", {"S4"})
+    monkeypatch.setattr(bridge, "LLAMAGUARD_REQUIRE_CHECKS", require)
+    monkeypatch.setattr(bridge, "extract_video_frames", lambda *a, **kw: [b"frame1", b"frame2"])
+    guard_replies("unsafe\nS12", "unsafe\nS12; S4:")
+    verdict = run(bridge.check_media_safety(b"vid", "video/mp4", "chat", "a.mp4"))
+    assert verdict is bridge.SafetyVerdict.UNAVAILABLE
+
+
+def test_video_with_complete_frames_follows_the_policy(bridge, guard_replies, monkeypatch):
+    monkeypatch.setattr(bridge, "LLAMAGUARD_CHECKS", {"S4"})
+    monkeypatch.setattr(bridge, "extract_video_frames", lambda *a, **kw: [b"frame1", b"frame2"])
+    guard_replies("unsafe\nS12", "safe")
+    assert run(bridge.check_media_safety(b"vid", "video/mp4", "chat", "a.mp4")) is bridge.SafetyVerdict.SAFE
+    guard_replies("unsafe\nS12", "unsafe\nS12; S4.")
+    assert run(bridge.check_media_safety(b"vid", "video/mp4", "chat", "a.mp4")) is bridge.SafetyVerdict.BLOCKED
+
+
+def test_incomplete_classification_sends_nothing_and_releases_dedup_marks(bridge, guard_replies, monkeypatch):
+    class NoSendClient:
+        async def upload(self, *args, **kwargs):
+            raise AssertionError("nothing may be uploaded for an unclassified image")
+
+        async def room_send(self, *args, **kwargs):
+            raise AssertionError("no Matrix event may be sent for an unclassified image")
+
+    image_bytes = b"image-with-incomplete-classification-issue-48"
+
+    async def download_media(file=None):
+        return image_bytes
+
+    message = SimpleNamespace(
+        id=4848,
+        photo=SimpleNamespace(id=484848),
+        video=None,
+        document=None,
+        file=SimpleNamespace(mime_type="image/jpeg", name="a.jpg", size=len(image_bytes)),
+        download_media=download_media,
+    )
+
+    monkeypatch.setattr(bridge, "LLAMAGUARD_CHECKS", {"S4"})
+    monkeypatch.setattr(bridge, "ENABLE_IMAGES", True)
+    monkeypatch.setattr(bridge, "matrix_client", NoSendClient())
+    guard_replies("unsafe")
+
+    run(bridge.process_and_upload_media(message, "chat", "chan"))
+
+    assert bridge.SAFETY_STATS == {"blocked": 0, "unavailable": 1}
+    content_key = f"sha256_{bridge.compute_sha256(image_bytes)}"
+    assert bridge.media_deduplicator.is_duplicate("tg_photo_484848") is False
     assert bridge.media_deduplicator.is_duplicate(content_key) is False
 
 
