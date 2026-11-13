@@ -2143,3 +2143,57 @@ def test_alias_stays_suppressed_after_the_original_succeeds(bridge, monkeypatch,
     assert client.uploaded == ["a.jpg"]
     assert len(client.events) == 1
     assert fresh_dedup.is_duplicate("tg_photo_32") is True
+
+
+# --- Compression resolution bounds (issue #53) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "max_height, max_width",
+    [(720, 1280), (1080, 1920), (480, 854), (240, 428)],
+)
+def test_compression_filter_bounds_both_sides(bridge, max_height, max_width):
+    scale = bridge.compression_scale_filter(max_height)
+    assert f"w='min(iw,{max_width})'" in scale
+    assert f"h='min(ih,{max_height})'" in scale
+    assert "force_original_aspect_ratio=decrease" in scale
+    assert "force_divisible_by=2" in scale
+
+
+@pytest.mark.skipif(
+    shutil.which("ffprobe") is None or shutil.which("ffmpeg") is None,
+    reason="needs a real ffmpeg/ffprobe installation",
+)
+@pytest.mark.parametrize(
+    "size, max_height, expected",
+    [
+        ("640x480", 240, (320, 240)),  # the issue's reproduction: landscape ignored the setting
+        ("1920x1080", 720, (1280, 720)),  # default output unchanged
+        ("1920x1080", 1080, (1920, 1080)),  # no fixed 1280 width cap any more
+        ("1000x1000", 720, (720, 720)),  # square
+        ("1080x1920", 720, (406, 720)),  # portrait unchanged
+        ("641x481", 720, (640, 480)),  # odd size: libx264 used to reject the width
+        ("320x240", 720, (320, 240)),  # never upscaled
+    ],
+)
+def test_real_compression_respects_the_bounds(bridge, monkeypatch, tmp_path, size, max_height, expected):
+    clip = tmp_path / "in.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-f", "lavfi",
+            "-i", f"testsrc=duration=1:size={size}:rate=5", "-c:v", "ffv1", str(clip), "-y",
+        ],
+        check=True,
+        timeout=60,
+    )
+    scratch = tmp_path / "shm"
+    scratch.mkdir()
+    monkeypatch.setattr(sys.modules["media"], "SHM_PATH", str(scratch))
+    monkeypatch.setattr(sys.modules["config"], "FFMPEG_PATH", shutil.which("ffmpeg"))
+
+    result = bridge.compress_video(
+        clip.read_bytes(), "in.mkv", 10**9, "chat", max_height=max_height, preset="ultrafast", crf=40
+    )
+
+    assert result is not None
+    assert (result["w"], result["h"]) == expected
