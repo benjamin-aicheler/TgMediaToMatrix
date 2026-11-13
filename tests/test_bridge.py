@@ -1433,3 +1433,69 @@ def test_help_mentions_the_all_scope(bridge, monkeypatch):
 
     assert "!tmmb start [all]" in sent["plain"]
     assert "!tmmb status [all]" in sent["plain"]
+
+
+# --- Llama Guard category configuration (issue #60) ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (None, set()),
+        ("", set()),
+        (" , ,", set()),
+        ("S4", {"S4"}),
+        ("S1,S4", {"S1", "S4"}),
+        (" s4 , S12 ,", {"S4", "S12"}),
+        ("S1,S14", {"S1", "S14"}),
+        ("S4,S4", {"S4"}),
+    ],
+)
+def test_category_list_accepts_valid_entries(bridge, raw, expected):
+    assert bridge.parse_category_list("LLAMAGUARD_CHECKS", raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, bad",
+    [
+        ("S04", ["S04"]),
+        ("4", ["4"]),
+        ("S15", ["S15"]),
+        ("S0", ["S0"]),
+        ("S4 S12", ["S4 S12"]),
+        ("S-12", ["S-12"]),
+        ("S1,S04,S4,X", ["S04", "X"]),
+    ],
+)
+def test_category_list_rejects_unknown_entries(bridge, raw, bad):
+    with pytest.raises(ValueError) as excinfo:
+        bridge.parse_category_list("LLAMAGUARD_REQUIRE_CHECKS", raw)
+    message = str(excinfo.value)
+    assert "LLAMAGUARD_REQUIRE_CHECKS" in message
+    assert repr(bad) in message
+    assert "S1 to S14" in message
+
+
+def test_configured_and_parsed_categories_share_one_definition(bridge):
+    assert bridge.safety.VALID_CATEGORIES is bridge.config.LLAMAGUARD_CATEGORIES
+
+
+def test_invalid_category_config_fails_at_startup():
+    """A typo must stop the bridge at startup, not silently disable the check."""
+    import os
+
+    from conftest import APP_DIR, REQUIRED_ENV
+
+    env = {**os.environ, **REQUIRED_ENV, "LLAMAGUARD_CHECKS": "S1,S04"}
+    result = subprocess.run(
+        [sys.executable, "-c", "import config"],
+        check=False,
+        cwd=APP_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode != 0
+    assert "LLAMAGUARD_CHECKS contains unknown Llama Guard categories ['S04']" in result.stderr

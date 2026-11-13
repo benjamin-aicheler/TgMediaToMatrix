@@ -27,7 +27,8 @@ class SafetyVerdict(Enum):
 
 # The categories the prompt below defines. A response naming anything else was not
 # produced against this taxonomy and cannot be evaluated against the configured lists.
-VALID_CATEGORIES = frozenset(f"S{i}" for i in range(1, 15))
+# config validates LLAMAGUARD_CHECKS / LLAMAGUARD_REQUIRE_CHECKS against the same set.
+VALID_CATEGORIES = config.LLAMAGUARD_CATEGORIES
 
 # Separators accepted between categories ("S1,S10", "S1, S10", "S1; S10", "S1 S10").
 _CATEGORY_SEPARATORS = re.compile(r"[,;\s]+")

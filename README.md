@@ -93,8 +93,8 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `LLAMAGUARD_API_URL` | Base URL of an OpenAI-compatible Vision API for Llama Guard checks | `http://192.168.1.100:8000/v1` (Default: `None`/Disabled) |
 | `LLAMAGUARD_MODEL_NAME` | Model name to request for safety moderation | `meta-llama/llama-guard-4-12b` |
 | `LLAMAGUARD_API_KEY` | API authentication key for Llama Guard endpoint if required | `your-api-key` (Default: `None`) |
-| `LLAMAGUARD_CHECKS` | Comma-separated list of safety categories to block. If empty, blocks on any safety violation. | `S1,S2,S3,S4` (Default: empty / block on any) |
-| `LLAMAGUARD_REQUIRE_CHECKS` | Comma-separated list of required safety categories (whitelist mode). If set, safe content and any content not matching these categories is blocked. | `S12` (Default: empty / disable whitelist mode) |
+| `LLAMAGUARD_CHECKS` | Comma-separated list of safety categories to block. If empty, blocks on any safety violation. Entries must be `S1`–`S14`; anything else (e.g. `S04`) stops the bridge at startup. | `S1,S2,S3,S4` (Default: empty / block on any) |
+| `LLAMAGUARD_REQUIRE_CHECKS` | Comma-separated list of required safety categories (whitelist mode). If set, safe content and any content not matching these categories is blocked. Entries must be `S1`–`S14`; anything else stops the bridge at startup. | `S12` (Default: empty / disable whitelist mode) |
 | `LLAMAGUARD_VIDEO_FRAMES` | Number of frames to extract and check concurrently from each video | `5` (Default: `5`) |
 | `LLAMAGUARD_RANDOM_FRAMES` | Extract frames randomly throughout the video duration instead of evenly spaced. Set to `false` for evenly spaced selection. | `true` (Default: `true`) |
 
