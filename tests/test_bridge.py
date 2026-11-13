@@ -2321,3 +2321,72 @@ def test_toggle_flipping_mid_split_does_not_split_the_set(bridge, monkeypatch):
     client = run(scenario())
     # The rooms were fixed when the split started, so room B gets the complete set too.
     assert_parts_contiguous(client, 3)
+
+
+# --- Minimum size applies to the original upload (issue #55) -------------------------
+
+
+class RenditionVideoMessage:
+    """A video whose primary document is large; a smaller rendition is downloaded instead."""
+
+    def __init__(self, primary_id, primary_size):
+        self.id = primary_id
+        self.file = SimpleNamespace(mime_type="video/mp4", name="clip.mp4", size=primary_size)
+        self.photo = None
+        self.document = SimpleNamespace(id=primary_id, attributes=[])
+        self.primary_downloads = 0
+
+    async def download_media(self, file=None, thumb=None):
+        if thumb == -1:
+            return b"tg-thumb"
+        self.primary_downloads += 1
+        return b"primary" * 1000
+
+
+@pytest.fixture
+def rendition_setup(bridge, monkeypatch):
+    client = RecordingMatrixClient()
+    rendition_downloads = []
+
+    class FakeTelegram:
+        async def download_media(self, document, file=None):
+            rendition_downloads.append(document.id)
+            return document.data
+
+    monkeypatch.setattr(bridge, "matrix_client", client)
+    monkeypatch.setattr(sys.modules["state"], "tg_client", FakeTelegram())
+    monkeypatch.setattr(sys.modules["state"], "media_deduplicator", bridge.MediaDeduplicator())
+    monkeypatch.setattr(bridge, "LLAMAGUARD_API_URL", "")
+    monkeypatch.setattr(bridge, "ENABLE_VIDEOS", True)
+    monkeypatch.setattr(bridge, "MIN_VIDEO_SIZE_BYTES", 2000)
+    monkeypatch.setattr(bridge, "probe_image", lambda data: (640, 480, "image/jpeg"))
+    monkeypatch.setattr(bridge, "compute_blurhash", lambda data: None)
+    return SimpleNamespace(client=client, rendition_downloads=rendition_downloads)
+
+
+def test_rendition_below_the_minimum_is_forwarded_when_the_original_is_above(bridge, rendition_setup):
+    message = RenditionVideoMessage(primary_id=5501, primary_size=5000)
+    rendition = SimpleNamespace(id=9901, size=500, data=b"r" * 500, attributes=[])
+
+    run(bridge.process_and_upload_media(message, "chat", "chan", download_document=rendition))
+
+    assert rendition_setup.rendition_downloads == [9901]
+    assert message.primary_downloads == 0
+    sent = [event for event in rendition_setup.client.events]
+    assert len(sent) == 1
+    assert sent[0]["info"]["size"] == 500  # the rendition's bytes were sent
+    # The pre-download dedup key is still the primary document's ID, not the rendition's.
+    assert bridge.media_deduplicator.is_duplicate("tg_doc_5501") is True
+    assert bridge.media_deduplicator.is_duplicate("tg_doc_9901") is False
+
+
+def test_original_below_the_minimum_is_skipped_before_any_download(bridge, rendition_setup):
+    message = RenditionVideoMessage(primary_id=5502, primary_size=1000)
+    rendition = SimpleNamespace(id=9902, size=500, data=b"q" * 500, attributes=[])
+
+    run(bridge.process_and_upload_media(message, "chat", "chan", download_document=rendition))
+
+    assert rendition_setup.rendition_downloads == []
+    assert message.primary_downloads == 0
+    assert rendition_setup.client.events == []
+    assert bridge.media_deduplicator.is_duplicate("tg_doc_5502") is False

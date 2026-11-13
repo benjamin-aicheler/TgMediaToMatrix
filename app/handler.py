@@ -173,6 +173,8 @@ async def process_and_upload_media(message, source_chat, channel_name, download_
 
     # Telethon reports None for the size of some media; treat it as unknown instead of
     # letting the later ">" comparison raise TypeError.
+    # The minimum sizes deliberately describe the original upload, not download_document:
+    # a rendition (like a compressed version or split parts) may be smaller and still passes.
     file_size = (message.file.size if message.file else 0) or 0
     if is_image and config.MIN_IMAGE_SIZE_BYTES > 0 and file_size < config.MIN_IMAGE_SIZE_BYTES:
         logger.info(f"[{source_chat}] Skipping image {filename}: File size ({round(file_size / 1024, 2)} KB) is below minimum required size of {config.MIN_IMAGE_SIZE_KB} KB.")

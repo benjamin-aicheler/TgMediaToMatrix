@@ -83,8 +83,8 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `VIDEO_COMPRESSION_PRESET` | FFmpeg x264 preset (`ultrafast`, `veryfast`, `fast`, etc.) | `veryfast` (Default: `veryfast`) |
 | `VIDEO_COMPRESSION_CRF` | Constant Rate Factor for video re-encoding (26–30 recommended) | `28` (Default: `28`) |
 | `VIDEO_COMPRESSION_THREADS` | Number of CPU threads allocated to FFmpeg | `2` (Default: `2`) |
-| `MIN_IMAGE_SIZE_KB` | Minimum file size in KB for images to be forwarded (accepts `MIN_IMAGE_SIZE_MB`) | `100` (Default: `0` / Disabled) |
-| `MIN_VIDEO_SIZE_KB` | Minimum file size in KB for videos to be forwarded (accepts `MIN_VIDEO_SIZE_MB`) | `1024` (Default: `0` / Disabled) |
+| `MIN_IMAGE_SIZE_KB` | Minimum file size in KB for images to be forwarded (accepts `MIN_IMAGE_SIZE_MB`). Checked against the original Telegram upload. | `100` (Default: `0` / Disabled) |
+| `MIN_VIDEO_SIZE_KB` | Minimum file size in KB for videos to be forwarded (accepts `MIN_VIDEO_SIZE_MB`). Checked against the original Telegram upload: a lower-resolution rendition, a compressed version or split parts may be smaller and are still forwarded. | `1024` (Default: `0` / Disabled) |
 | `ENABLE_IMAGES` | Default for image bridging in every room at startup (change per room at runtime with `!tmmb`) | `true` (Default: `true`) |
 | `ENABLE_VIDEOS` | Default for video bridging in every room at startup (change per room at runtime with `!tmmb`) | `true` (Default: `true`) |
 | `DEDUPLICATION_ENABLED` | Enable prevention of duplicate media forwarding | `true` (Default: `true`) |
