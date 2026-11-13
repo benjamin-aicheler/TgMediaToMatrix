@@ -1803,3 +1803,181 @@ def test_resolve_topic_id_prefers_the_thread_top(bridge):
     message = SimpleNamespace(reply_to=foreign)
     assert bridge.resolve_topic_id(message, forum_channel()) == 42
     assert bridge.resolve_topic_id(SimpleNamespace(reply_to=None), None) is None
+
+
+# --- Split parts that still exceed the limit (issue #51) -----------------------------
+#
+# ffmpeg is replaced by a stand-in that writes part files of chosen sizes into the scratch
+# directory, so the real split_video_lossless() runs without ffmpeg or /dev/shm.
+
+
+@pytest.fixture
+def fake_segmenter(bridge, monkeypatch, tmp_path):
+    """Returns a recorder; set .sizes_for(segment_time) to choose the produced part sizes."""
+    media_module = sys.modules["media"]
+    recorder = SimpleNamespace(segment_times=[], thumbnails=0, sizes_for=None)
+
+    def fake_run(cmd, **kwargs):
+        seconds = float(cmd[cmd.index("-segment_time") + 1])
+        recorder.segment_times.append(seconds)
+        pattern = cmd[-1]
+        for i, size in enumerate(recorder.sizes_for(seconds)):
+            with open(pattern.replace("%03d", f"{i:03d}"), "wb") as f:
+                f.write(b"p" * size)
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    def fake_thumbnail(data):
+        recorder.thumbnails += 1
+
+    monkeypatch.setattr(media_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(media_module, "SHM_PATH", str(tmp_path))
+    monkeypatch.setattr(sys.modules["config"], "FFMPEG_PATH", "/opt/fake/ffmpeg")
+    monkeypatch.setattr(media_module, "probe_video_duration", lambda *a, **kw: 2.0)
+    monkeypatch.setattr(media_module, "probe_video_dimensions", lambda *a, **kw: (320, 240))
+    monkeypatch.setattr(media_module, "extract_video_thumbnail", fake_thumbnail)
+    return recorder
+
+
+def split(bridge, size=5000, limit=1000, duration=20.0):
+    return bridge.split_video_lossless(b"v" * size, "clip.mp4", limit, "chat", known_duration=duration)
+
+
+def test_split_within_the_limit_is_unchanged(bridge, fake_segmenter):
+    fake_segmenter.sizes_for = lambda seconds: [800] * 7
+
+    parts = split(bridge)
+
+    assert [p["size"] for p in parts] == [800] * 7
+    assert [p["filename"] for p in parts][:2] == ["clip_part1_of_7.mp4", "clip_part2_of_7.mp4"]
+    assert len(fake_segmenter.segment_times) == 1
+
+
+def test_oversized_part_is_retried_with_shorter_segments(bridge, fake_segmenter):
+    # First pass: uneven bitrate leaves one 1500-byte part. Shorter segments fit.
+    fake_segmenter.sizes_for = lambda seconds: [800, 1500, 700, 900, 600, 500] if seconds > 2 else [600] * 10
+
+    parts = split(bridge)
+
+    first, second = fake_segmenter.segment_times
+    assert second < first
+    # Scaled by the overshoot: limit * 0.85 / largest part.
+    assert second == pytest.approx(round(first * 1000 * 0.85 / 1500, 2))
+    assert [p["size"] for p in parts] == [600] * 10
+    assert parts[0]["total_parts"] == 10
+
+
+def test_split_that_cannot_fit_returns_nothing(bridge, fake_segmenter, caplog):
+    # Keyframes too far apart: shorter segments produce the same oversized parts.
+    fake_segmenter.sizes_for = lambda seconds: [3000, 2000]
+
+    with caplog.at_level(logging.WARNING):
+        parts = split(bridge)
+
+    assert parts == []
+    assert len(fake_segmenter.segment_times) == 2
+    # Rejected before any part is read, probed or thumbnailed.
+    assert fake_segmenter.thumbnails == 0
+    assert any("cannot be split losslessly below" in r.getMessage() for r in caplog.records)
+
+
+def test_no_size_retry_when_segments_are_already_minimal(bridge, fake_segmenter):
+    fake_segmenter.sizes_for = lambda seconds: [3000, 2000]
+
+    # 2 s of video in parts of max(1.0, ...) seconds: nothing shorter to try.
+    assert split(bridge, duration=2.0) == []
+    assert fake_segmenter.segment_times == [1.0]
+
+
+def prepare_real_split(bridge, monkeypatch, fallback, compressed_size=900):
+    client = RecordingMatrixClient()
+    monkeypatch.setattr(bridge, "matrix_client", client)
+    monkeypatch.setattr(bridge, "MAX_MEDIA_SIZE_BYTES", 1000)
+    monkeypatch.setattr(bridge, "LLAMAGUARD_API_URL", "")
+    monkeypatch.setattr(bridge, "OVERSIZED_VIDEO_ACTION", "split")
+    monkeypatch.setattr(bridge, "OVERSIZED_VIDEO_FALLBACK_COMPRESS", fallback)
+    monkeypatch.setattr(bridge, "probe_image", lambda data: (640, 480, "image/jpeg"))
+    monkeypatch.setattr(bridge, "compute_blurhash", lambda data: None)
+
+    async def enough_ramdisk(*args, **kwargs):
+        return True
+
+    compress_calls = []
+
+    def fake_compress(video_bytes, filename, max_bytes, source_chat, **kwargs):
+        compress_calls.append((len(video_bytes), client.events[:]))
+        return {"bytes": b"c" * compressed_size, "filename": "clip.mp4", "duration_ms": 20000,
+                "w": 640, "h": 360, "size": compressed_size}
+
+    monkeypatch.setattr(bridge, "reserve_shm_space", enough_ramdisk)
+    monkeypatch.setattr(bridge, "compress_video", fake_compress)
+    return client, compress_calls
+
+
+def test_unsplittable_video_falls_back_to_compression_without_sending_parts(bridge, monkeypatch, fake_segmenter):
+    fake_segmenter.sizes_for = lambda seconds: [3000, 2000]
+    client, compress_calls = prepare_real_split(bridge, monkeypatch, fallback=True)
+
+    run(bridge.process_and_upload_media(FakeVideoMessage(b"s" * 5000), "chat", "chan"))
+
+    assert len(compress_calls) == 1
+    _, events_before_compression = compress_calls[0]
+    assert events_before_compression == []
+    assert len(client.events) == 1
+    assert "Part" not in client.events[0]["body"]
+    assert client.events[0]["info"]["size"] == 900
+
+
+def test_unsplittable_video_is_skipped_without_fallback(bridge, monkeypatch, fake_segmenter):
+    fake_segmenter.sizes_for = lambda seconds: [3000, 2000]
+    client, compress_calls = prepare_real_split(bridge, monkeypatch, fallback=False)
+    video = b"n" * 5000
+
+    run(bridge.process_and_upload_media(FakeVideoMessage(video), "chat", "chan"))
+
+    assert compress_calls == []
+    assert client.events == []
+    # Only the Telegram thumbnail was uploaded; no video part.
+    assert all(name.startswith("thumbnail") for name in client.uploaded_filenames)
+    content_key = f"sha256_{bridge.compute_sha256(video)}"
+    assert bridge.media_deduplicator.is_duplicate(content_key) is False
+
+
+def test_fallback_result_still_too_large_is_skipped(bridge, monkeypatch, fake_segmenter):
+    fake_segmenter.sizes_for = lambda seconds: [3000, 2000]
+    client, compress_calls = prepare_real_split(bridge, monkeypatch, fallback=True, compressed_size=1500)
+
+    run(bridge.process_and_upload_media(FakeVideoMessage(b"t" * 5000), "chat", "chan"))
+
+    assert len(compress_calls) == 1
+    assert client.events == []
+
+
+@pytest.mark.skipif(
+    shutil.which("ffprobe") is None or shutil.which("ffmpeg") is None,
+    reason="needs a real ffmpeg/ffprobe installation",
+)
+def test_real_split_with_sparse_keyframes_is_rejected(bridge, monkeypatch, tmp_path):
+    """The issue's reproduction: 4 s of H.264, keyframes 2 s apart, limit a fifth of the input."""
+    clip = tmp_path / "sparse.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-f", "lavfi",
+            "-i", "testsrc=duration=4:size=320x240:rate=10",
+            "-pix_fmt", "yuv420p", "-c:v", "libx264", "-g", "20",
+            "-x264-params", "scenecut=0", str(clip), "-y",
+        ],
+        check=True,
+        timeout=60,
+    )
+    data = clip.read_bytes()
+    scratch = tmp_path / "shm"
+    scratch.mkdir()
+    monkeypatch.setattr(sys.modules["media"], "SHM_PATH", str(scratch))
+    monkeypatch.setattr(sys.modules["config"], "FFMPEG_PATH", shutil.which("ffmpeg"))
+
+    assert bridge.split_video_lossless(data, "sparse.mp4", len(data) // 5, "chat", known_duration=4.0) == []
+    # A limit the 2 s parts fit under still splits normally.
+    parts = bridge.split_video_lossless(data, "sparse.mp4", int(len(data) * 0.8), "chat", known_duration=4.0)
+    assert len(parts) >= 2
+    assert all(p["size"] <= int(len(data) * 0.8) for p in parts)
+    assert list(scratch.iterdir()) == []
