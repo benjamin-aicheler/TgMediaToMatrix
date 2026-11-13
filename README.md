@@ -41,7 +41,7 @@ It extracts, uploads, and structures files cleanly to provide an optimized viewi
   - Rejects media smaller than configured minimum thresholds (`MIN_IMAGE_SIZE_KB` / `MIN_VIDEO_SIZE_KB`).
   - When a video exceeds `MAX_MEDIA_SIZE_MB`, the bridge can automatically process it instead of dropping it:
     - **Lossless Stream Splitting (`split`, default)**: Slices the video at keyframes using FFmpeg stream copy (`-c copy`) in RAM (`/dev/shm`). Operates in sub-seconds with **~0% CPU load and 100% original quality**, making it perfect for low-power devices like the **Raspberry Pi 4**.
-    - **Fast Low-Resource Compression (`compress`)**: Re-encodes videos down to 720p with `libx264` fast presets and audio stream passthrough.
+    - **Fast Low-Resource Compression (`compress`)**: Re-encodes videos down to `VIDEO_COMPRESSION_MAX_HEIGHT` (default 720p) with `libx264` fast presets and audio stream passthrough.
     - **Ceiling Protection**: Rejects videos larger than `OVERSIZED_VIDEO_MAX_INPUT_MB` (e.g. 250 MB) before downloading to prevent OOM — unless one of Telegram's lower-resolution renditions fits (see *Alternate Renditions*).
 - **Alternate Renditions for Oversized Videos**: Instead of dropping a video that exceeds `MAX_MEDIA_SIZE_MB`, the bridge uses one of Telegram's lower-resolution renditions (`alt_documents`): the highest resolution that fits the upload limit is sent as a single message without FFmpeg, otherwise the highest that fits the processing ceiling is split or compressed. Controlled by `PREFER_ALTERNATE_RENDITION` (default `true`).
 - **Dynamic Interactive Chat Commands**: When `ADMIN_MATRIX_USER_ID` is set, the authorized admin user can send `!tmmb` commands in Matrix to query status or dynamically toggle image and video bridging on the fly — per room, or for every room with the trailing `all`.
@@ -79,7 +79,7 @@ The bridge is configured via environment variables in the `docker-compose.yml` f
 | `SHM_WAIT_TIMEOUT_SECONDS` | How long to wait for free ramdisk space before an oversized video is skipped (`0` = skip immediately) | `30` (Default: `30`) |
 | `OVERSIZED_VIDEO_FALLBACK_COMPRESS` | Fallback to compression if lossless splitting cannot find keyframes to split below limit | `false` (Default: `false`) |
 | `PREFER_ALTERNATE_RENDITION` | Use Telegram's lower-resolution renditions of oversized videos instead of skipping them (see *Alternate Renditions*) | `true` (Default: `true`) |
-| `VIDEO_COMPRESSION_MAX_HEIGHT` | Maximum vertical resolution when compressing oversized videos | `720` (Default: `720`) |
+| `VIDEO_COMPRESSION_MAX_HEIGHT` | Maximum height when compressing oversized videos; the width is capped to the matching 16:9 width (1280 at 720). Aspect ratio is kept, smaller videos are never upscaled. | `720` (Default: `720`) |
 | `VIDEO_COMPRESSION_PRESET` | FFmpeg x264 preset (`ultrafast`, `veryfast`, `fast`, etc.) | `veryfast` (Default: `veryfast`) |
 | `VIDEO_COMPRESSION_CRF` | Constant Rate Factor for video re-encoding (26–30 recommended) | `28` (Default: `28`) |
 | `VIDEO_COMPRESSION_THREADS` | Number of CPU threads allocated to FFmpeg | `2` (Default: `2`) |
@@ -120,12 +120,17 @@ Every toggle is scoped to a room: a command without an argument changes only the
 
 `enable`/`start` require the admin; `stop`/`disable` follow `ALLOW_NON_ADMIN_STOP` for the own room, and require the admin when combined with `all`.
 
+Commands arrive through the Matrix sync. If the homeserver rejects the access token (revoked or expired), the bridge logs a critical error and stops listening for commands until `MATRIX_ACCESS_TOKEN` is replaced and the container restarted. The same token is used for uploads, so media stops reaching Matrix as well until then. Other sync errors are retried with a growing delay (5 s up to 5 min) and do not affect media forwarding.
+
 
 ### Specifying Channels & Topics in `TG_CHANNELS`
 The `TG_CHANNELS` environment variable accepts a comma-separated list of several formats:
 - **Public Username**: `MyChannel` or `@MyChannel` (any casing; `@` is stripped automatically).
 - **Private Channel / Group ID**: `-1001234567890`.
 - **Forum Topic Filter**: `channel_id:topic_id` or `username:topic_id` (e.g. `-1001234567890:42`). This configures the bridge to only forward media posted inside that specific topic ID (subchannel thread) of the forum.
+  - Replies inside a topic count as that topic, whatever message they reply to.
+  - The forum's **General** topic is topic `1` (e.g. `-1001234567890:1`).
+  - Media from a forum is labelled `Channel - Topic` in Matrix, including `Channel - General`.
 
 ---
 
@@ -144,7 +149,10 @@ To prevent duplicate media messages when identical content is posted across mult
    - This tier is an exact match, which is also its limit: two separate uploads of the same content are re-encoded independently by Telegram, produce different bytes, and are therefore **not** recognised as duplicates. Tier 1 catches those only when the repost keeps the original document ID.
 3. **Album Integrity**:
    - For Telegram albums (grouped media), deduplication runs per item. If an album contains a mix of previously seen media and new media, the novel items are forwarded cleanly while duplicates are suppressed.
-4. **Bounded Memory**:
+4. **Failed Attempts Are Forgotten**:
+   - Each mark is set as soon as it is known (the media ID before the download, the hash right after it), not only after delivery, so a repost arriving mid-way is suppressed. If forwarding then fails for a technical reason (download or upload error, safety classifier unavailable, video that cannot be processed), the marks are released again, together with those of identical copies that were skipped in the meantime, so a repost is tried again.
+   - Media blocked deliberately by the safety policy stays remembered for the whole window and is not retried.
+5. **Bounded Memory**:
    - Deduplication is tracked in an LRU/FIFO `OrderedDict` limited to `DEDUPLICATION_CACHE_SIZE` (default: `2000` items) with automatic time-based purging, maintaining a negligible memory footprint (< 1 MB) over indefinite uptimes.
 
 ---
@@ -160,10 +168,12 @@ When Telegram channels post videos that exceed your configured `MAX_MEDIA_SIZE_M
    - **Sub-Second Performance**: Takes only ~0.1s – 0.4s to execute, even on low-power ARM CPUs like the **Raspberry Pi 4 Model B**.
    - **Zero Quality Loss**: The video and audio bitstreams remain 100% untouched and identical to the original upload.
    - **Zero CPU Heat**: CPU usage remains near 0%, avoiding thermal throttling.
+   - **Parts Always Fit**: If a part would still exceed `MAX_MEDIA_SIZE_MB` (keyframes too far apart, or uneven bitrate), the split is retried once with shorter segments, still without re-encoding. If the parts still do not fit, none of them is used: `OVERSIZED_VIDEO_FALLBACK_COMPRESS=true` compresses the video instead, otherwise it is skipped.
+   - **Delivered as One Set**: All parts are uploaded first and then posted back to back, so no other message from the bridge lands between them. If any part fails to upload, no part is posted and a repost is tried again. (Messages from other Matrix users can still appear in between.)
    - **Matrix Presentation**: Each part is posted into the Matrix room with updated captions and individual metadata (e.g. `Part 1/2 • 1920x1080 58.4 MB`). Every part carries its **own thumbnail**: one frame is sampled in-memory from a little past the middle of that part (PyAV, no re-encode) and uploaded separately, and its Blurhash is computed from that frame — roughly 0.2–0.9s of extra decode work and one small upload per part on a Pi-class CPU. The primary document's Telegram thumbnail remains the fallback when a frame cannot be extracted or the extra upload is rejected.
 
 2. **`compress`**:
-   - Re-encodes oversized videos down to a maximum resolution (`VIDEO_COMPRESSION_MAX_HEIGHT`, default `720p`) using `libx264` with fast presets (`VIDEO_COMPRESSION_PRESET`, default `veryfast`) and audio stream copying (`-c:a copy`).
+   - Re-encodes oversized videos down to a maximum height (`VIDEO_COMPRESSION_MAX_HEIGHT`, default `720p`; the width is capped to the matching 16:9 width, the aspect ratio is kept and nothing is upscaled) using `libx264` with fast presets (`VIDEO_COMPRESSION_PRESET`, default `veryfast`) and audio stream copying (`-c:a copy`).
    - Preserves a single video file, but consumes CPU cycles during encoding.
 
 3. **`skip`**:
@@ -197,7 +207,7 @@ The bridge supports real-time, automated image and video content moderation usin
 1. **In-Memory Frame Extraction**: When a video is downloaded, the bridge extracts multiple frames (configurable via `LLAMAGUARD_VIDEO_FRAMES`, defaults to `5`) in-memory using `PyAV` (`av`) and `Pillow` (`PIL`). By default, frames are selected randomly from across the video duration for maximum safety coverage (or evenly spaced if `LLAMAGUARD_RANDOM_FRAMES` is set to `false`). No media files are ever written to disk.
 2. **Concurrent Safety Queries**: The bridge encodes each extracted frame into base64 and schedules Llama Guard safety API calls for all of them concurrently (in parallel) using Python's `asyncio.gather` for maximum throughput and near-instant audit times. If any frame fails to check due to an API error, the video is blocked (fail-closed). When block-lists or required-lists (whitelists) are configured, results are aggregated dynamically: if *any single frame* contains a category on your block-list (`LLAMAGUARD_CHECKS`), the video is strictly blocked. If whitelist mode is active (`LLAMAGUARD_REQUIRE_CHECKS`), at least *one frame* must match the required categories (and no frames must violate the block-list) for the video to be forwarded.
 3. **Classification and Categories**: Llama Guard typically outputs safety ratings (e.g., `safe` or `unsafe` followed by the violated categories like `S1`, `S2`, etc.).
-4. **Fail-Closed Design**: If the Llama Guard endpoint is unreachable, is misconfigured, or lacks the necessary library bindings (`av` or `Pillow`), the bridge logs the error and blocks the media from being forwarded. The same applies to a response the bridge cannot read completely: `unsafe` without a category, a category outside `S1`–`S14`, or unexpected text in the category list is treated as a failed check rather than guessed at, so a blocked category can never be lost in parsing. Such failures are not remembered by the duplicate filter, so a repost is checked again. This ensures that no unchecked or unmoderated media passes through when content moderation is enabled.
+4. **Fail-Closed Design**: If the Llama Guard endpoint is unreachable, is misconfigured, or lacks the necessary library bindings (`av` or `Pillow`), or a video cannot be decoded completely for frame sampling, the bridge logs the error and blocks the media from being forwarded. The same applies to a response the bridge cannot read completely: `unsafe` without a category, a category outside `S1`–`S14`, or unexpected text in the category list is treated as a failed check rather than guessed at, so a blocked category can never be lost in parsing. Such failures are not remembered by the duplicate filter, so a repost is checked again. This ensures that no unchecked or unmoderated media passes through when content moderation is enabled.
 
 ### Configuring Safety Checks
 The `LLAMAGUARD_CHECKS` environment variable allows you to configure which specific `Sxx` guidelines are strictly enforced:
