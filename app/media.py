@@ -114,8 +114,16 @@ def extract_video_frames(video_bytes: bytes, max_frames: int = 5, use_random: bo
                 frames_bytes.append(img_bytes_io.getvalue())
                 break
 
-    except Exception as e:  # noqa: BLE001 - PyAV/Pillow raise library-specific errors; no frames just disables the check
-        logger.error(f"Failed to extract frames from video: {e}")
+    except Exception as e:  # noqa: BLE001 - PyAV/Pillow raise library-specific errors; the caller fails closed on []
+        # Discard any frames collected before the failure. A partial sample only covers
+        # the part of the video that decoded cleanly, so classifying it could pass a video
+        # whose later frames were never checked. An empty list makes the safety check
+        # return UNAVAILABLE (fail-closed) instead.
+        logger.error(
+            f"Failed to extract frames from video after {len(frames_bytes)} frame(s): {e}. "
+            f"Discarding the partial sample."
+        )
+        return []
     finally:
         if container is not None:
             try:
