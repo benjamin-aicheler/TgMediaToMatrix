@@ -49,9 +49,15 @@ This file contains development rules and architectural guidelines for AI agents 
 
 ### Fail-Closed Design
 - When content moderation is configured/enabled, any processing error, frame extraction failure, or external API communication failure MUST result in a fail-closed response (i.e., block the media from being forwarded). Unmoderated content must never be allowed to pass.
+- The classifier response must be understood completely before any policy is applied (`safety.parse_classification()`). `unsafe` without a category, a category outside `S1`–`S14`, or any token that cannot be read is a technical failure (`UNAVAILABLE`), never an empty or partial category list. Silently dropping a token would make a blocked category look unconfigured and let the media pass.
 
 ### Filter Adherence
 - Fully respect user-configured safety categories in `LLAMAGUARD_CHECKS`. If the content is classified as unsafe but none of the violated categories overlap with the user's configured important checks, the media must be permitted to pass.
+- Policy semantics (confirmed by the maintainer; keep them):
+  - `LLAMAGUARD_CHECKS` blocks when any listed category is flagged; for a video, one flagged frame blocks it.
+  - `LLAMAGUARD_REQUIRE_CHECKS` forwards only when at least one required category is flagged; for a video, one matching frame is enough. Safe media is blocked.
+  - When both are set, the block list wins.
+  - When both are empty, any `unsafe` result blocks and only `safe` media is forwarded ("block all violations" default).
 
 ### Media Thumbnailing
 - Image thumbnails must be generated dynamically in-memory from full-sized media bytes using Pillow rather than making redundant network requests to Telegram.

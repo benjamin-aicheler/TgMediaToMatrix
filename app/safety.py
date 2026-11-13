@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from enum import Enum
 
 import config
@@ -22,6 +23,58 @@ class SafetyVerdict(Enum):
     SAFE = "safe"
     BLOCKED = "blocked"
     UNAVAILABLE = "unavailable"
+
+
+# The categories the prompt below defines. A response naming anything else was not
+# produced against this taxonomy and cannot be evaluated against the configured lists.
+VALID_CATEGORIES = frozenset(f"S{i}" for i in range(1, 15))
+
+# Separators accepted between categories ("S1,S10", "S1, S10", "S1; S10", "S1 S10").
+_CATEGORY_SEPARATORS = re.compile(r"[,;\s]+")
+
+
+class ClassificationParseError(ValueError):
+    """The classifier response could not be understood completely."""
+
+
+def parse_classification(response_text: str) -> tuple[bool, list[str]]:
+    """Parses a Llama Guard response into (is_safe, violated_categories).
+
+    The whole response must be understood. Selective policies compare the categories with
+    LLAMAGUARD_CHECKS, so a category dropped during parsing would look exactly like one that
+    is not configured and let the media pass. Anything that is not a clean 'safe', or
+    'unsafe' followed by at least one known category, raises ClassificationParseError, which
+    the caller turns into a fail-closed UNAVAILABLE verdict.
+    """
+    tokens = response_text.split(maxsplit=1)
+    if not tokens:
+        raise ClassificationParseError("empty response")
+
+    status = tokens[0].lower()
+    rest = tokens[1].strip() if len(tokens) > 1 else ""
+
+    if status == "safe":
+        if rest:
+            raise ClassificationParseError(f"'safe' followed by unexpected content: {rest!r}")
+        return True, []
+
+    if status != "unsafe":
+        raise ClassificationParseError(f"unexpected status {tokens[0]!r}")
+
+    # One trailing period closes the list ("S1, S10."); any other punctuation is rejected.
+    rest = rest.removesuffix(".")
+    words = [w for w in _CATEGORY_SEPARATORS.split(rest) if w]
+    if not words:
+        raise ClassificationParseError("'unsafe' without any violated category")
+
+    violated = []
+    for word in words:
+        category = word.upper()
+        if category not in VALID_CATEGORIES:
+            raise ClassificationParseError(f"unrecognized category {word!r} in {rest!r}")
+        if category not in violated:
+            violated.append(category)
+    return False, violated
 
 
 async def get_image_safety_classification(image_bytes: bytes, source_chat: str, filename: str, index_label: str | None = None, mime_type: str = "image/jpeg") -> tuple[bool | None, list[str]]:
@@ -125,29 +178,15 @@ Provide your safety assessment for ONLY THE LAST User in the above conversation:
         response_text = resp_json["choices"][0]["message"]["content"].strip()
         logger.info(f"[{source_chat}]{label_prefix} Llama Guard classification result: {response_text}")
         
-        lines = response_text.split()
-        if not lines:
-            logger.error(f"[{source_chat}]{label_prefix} Llama Guard returned empty response.")
+        try:
+            return parse_classification(response_text)
+        except ClassificationParseError as e:
+            logger.error(
+                f"[{source_chat}]{label_prefix} Could not parse the Llama Guard response for {filename} "
+                f"({e}). Treating the classification as unavailable (fail-closed)."
+            )
             return None, []
-            
-        status = lines[0].lower()
-        if status == "unsafe":
-            # Extract violated categories
-            violated = []
-            for line in lines[1:]:
-                for word in line.replace(',', ' ').split():
-                    word_clean = word.strip().upper()
-                    if word_clean.startswith('S') and word_clean[1:].isdigit():
-                        violated.append(word_clean)
-            if not violated:
-                violated = ["UNSPECIFIED"]
-            return False, violated
-        elif status == "safe":
-            return True, []
-        else:
-            logger.error(f"[{source_chat}]{label_prefix} Llama Guard returned unexpected status '{status}'.")
-            return None, []
-            
+
     except Exception as e:  # noqa: BLE001 - any classifier failure must fail closed
         logger.error(f"[{source_chat}]{label_prefix} Error during Llama Guard safety check: {e}")
         return None, []
