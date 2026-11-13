@@ -578,6 +578,23 @@ def split_video_lossless(
         return results
 
 
+def compression_scale_filter(max_height: int) -> str:
+    """FFmpeg scale filter bounding a compressed video to max_height and its 16:9 width.
+
+    Both bounds apply to every orientation, so the setting also caps landscape and square
+    videos. min(...) never upscales, force_original_aspect_ratio=decrease keeps the aspect
+    ratio within both bounds, and force_divisible_by=2 keeps the dimensions even, which
+    libx264 needs for yuv420p (an odd width would make the encode fail outright).
+    At the default 720 the width bound is 1280, the previous fixed landscape width.
+    """
+    max_height = max(2, int(max_height))
+    max_width = ((max_height * 16 + 8) // 9 + 1) // 2 * 2
+    return (
+        f"scale=w='min(iw,{max_width})':h='min(ih,{max_height})'"
+        f":force_original_aspect_ratio=decrease:force_divisible_by=2"
+    )
+
+
 def compress_video(
     video_bytes: bytes,
     filename: str,
@@ -611,7 +628,7 @@ def compress_video(
         with open(input_path, "wb") as f:
             f.write(video_bytes)
 
-        scale_filter = f"scale='if(gte(iw,ih),min(1280,iw),-2)':'if(gte(iw,ih),-2,min({max_height},ih))'"
+        scale_filter = compression_scale_filter(max_height)
 
         cmd = [
             ffmpeg_bin,
