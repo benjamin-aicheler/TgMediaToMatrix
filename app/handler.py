@@ -406,7 +406,10 @@ async def process_and_upload_media(message, source_chat, channel_name, download_
                 return
 
             if config.OVERSIZED_VIDEO_FALLBACK_COMPRESS:
-                logger.info(f"[{source_chat}] Lossless split produced no parts; falling back to compression...")
+                logger.info(
+                    f"[{source_chat}] Lossless split could not produce parts within {config.MAX_MEDIA_SIZE_MB} MB; "
+                    f"falling back to compression..."
+                )
                 compressed = await asyncio.to_thread(
                     media.compress_video,
                     media_bytes,

@@ -484,45 +484,66 @@ def split_video_lossless(
             cmd.extend(["-movflags", "+faststart"])
         cmd.append(output_pattern)
 
-        res = subprocess.run(cmd, capture_output=True, check=False)
-        if res.returncode != 0:
-            logger.error(f"[{source_chat}] FFmpeg split error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
-            return []
+        def run_split(seconds: float, label: str) -> list[str] | None:
+            """Runs the segmenter (replacing earlier parts); None if ffmpeg failed."""
+            for f in os.listdir(tmp_dir):
+                if f.startswith("part_"):
+                    try:
+                        os.remove(os.path.join(tmp_dir, f))
+                    except OSError:
+                        pass
+            # Locate the argument by name: the optional -movflags pair shifts positions.
+            cmd[cmd.index("-segment_time") + 1] = str(seconds)
+            res = subprocess.run(cmd, capture_output=True, check=False)
+            if res.returncode != 0:
+                logger.error(f"[{source_chat}] FFmpeg {label} error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
+                return None
+            return sorted(
+                os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
+                if f.startswith("part_") and f.endswith(ext)
+            )
 
-        part_files = sorted([
-            os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
-            if f.startswith("part_") and f.endswith(ext)
-        ])
+        part_files = run_split(segment_time, "split")
+        if part_files is None:
+            return []
 
         if len(part_files) <= 1 and duration and duration > 2.0:
             segment_time = max(1.0, round(segment_time / 2, 2))
-            for f in part_files:
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-            # Retry with a shorter segment time. Locate the argument by name: positional
-            # indices are unreliable here, because the optional -movflags pair shifts them
-            # and cmd[-2] addresses "+faststart" instead of the segment time.
-            cmd[cmd.index("-segment_time") + 1] = str(segment_time)
-            res = subprocess.run(cmd, capture_output=True, check=False)
-            if res.returncode != 0:
-                logger.error(f"[{source_chat}] FFmpeg split retry error: {res.stderr.decode('utf-8', errors='replace')[:400]}")
-            part_files = sorted([
-                os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir)
-                if f.startswith("part_") and f.endswith(ext)
-            ])
+            part_files = run_split(segment_time, "split retry") or []
 
         if len(part_files) <= 1:
             logger.warning(f"[{source_chat}] Video could not be split losslessly (no internal keyframes found).")
             return []
 
-        oversized_parts = [f for f in part_files if os.path.getsize(f) > max_bytes]
-        if oversized_parts:
+        # Every part has to fit before any of them is used: a part the homeserver rejects
+        # would leave a gap in the sequence and bypass OVERSIZED_VIDEO_FALLBACK_COMPRESS.
+        # Sizes are checked before the parts are read, probed or thumbnailed.
+        largest = max(os.path.getsize(f) for f in part_files)
+        if largest > max_bytes:
+            # Uneven bitrate can overshoot even when keyframes are close enough: retry once
+            # with a segment time scaled by the overshoot. Still a stream copy, so cheap.
+            shorter = max(1.0, round(segment_time * (max_bytes * 0.85) / largest, 2))
+            if shorter < segment_time:
+                logger.info(
+                    f"[{source_chat}] Largest split part is {largest / (1024 * 1024):.2f} MB "
+                    f"(limit {max_bytes / (1024 * 1024):.2f} MB); retrying with {shorter}s segments "
+                    f"instead of {segment_time}s."
+                )
+                segment_time = shorter
+                retried = run_split(segment_time, "split size retry")
+                part_files = retried if retried and len(retried) > 1 else []
+                largest = max((os.path.getsize(f) for f in part_files), default=0)
+
+        if not part_files:
+            logger.warning(f"[{source_chat}] Split size retry produced no usable parts. No part is used.")
+            return []
+        if largest > max_bytes:
             logger.warning(
-                f"[{source_chat}] Splitting produced {len(part_files)} parts, but {len(oversized_parts)} part(s) "
-                f"still exceed {max_bytes / (1024 * 1024):.1f} MB due to keyframe spacing."
+                f"[{source_chat}] Video cannot be split losslessly below "
+                f"{max_bytes / (1024 * 1024):.2f} MB: the largest part is "
+                f"{largest / (1024 * 1024):.2f} MB, so keyframes are too far apart. No part is used."
             )
+            return []
 
         results = []
         total_parts = len(part_files)
