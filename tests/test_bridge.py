@@ -1435,6 +1435,172 @@ def test_help_mentions_the_all_scope(bridge, monkeypatch):
     assert "!tmmb status [all]" in sent["plain"]
 
 
+# --- Matrix sync error handling (issue #49) ------------------------------------------
+#
+# nio's SyncError.from_dict() stores the Matrix errcode in status_code and the readable text
+# in message, so these tests build their errors through from_dict(), as nio does.
+
+
+class StopRecordingClient:
+    def __init__(self):
+        self.stops = 0
+
+    def stop_sync_forever(self):
+        self.stops += 1
+
+
+@pytest.fixture
+def sync_bridge(bridge, monkeypatch):
+    """The entry-point module itself (not part of the facade), with its sync flags reset."""
+    module = sys.modules["bridge"]
+    monkeypatch.setattr(module, "MATRIX_SYNC_AUTH_FAILED", False)
+    monkeypatch.setattr(module, "MATRIX_SYNC_ERROR_STOP", False)
+    return module
+
+
+def sync_error(body, http_status=None):
+    error = nio.SyncError.from_dict(body)
+    if http_status is not None:
+        error.transport_response = SimpleNamespace(status=http_status)
+    return error
+
+
+@pytest.mark.parametrize(
+    "body, http_status",
+    [
+        ({"errcode": "M_UNKNOWN_TOKEN", "error": "Unrecognised access token"}, 401),
+        ({"errcode": "M_UNKNOWN_TOKEN", "error": "Unrecognised access token"}, None),
+        ({"errcode": "M_MISSING_TOKEN", "error": "Missing access token"}, 401),
+        ({"errcode": "M_UNKNOWN_TOKEN", "error": "Session expired", "soft_logout": True}, 401),
+        # A proxy's HTML 401 page: nio parses the body to {} and reports "unknown error".
+        ({}, 401),
+    ],
+    ids=["unknown-token", "unknown-token-no-transport", "missing-token", "soft-logout", "html-401"],
+)
+def test_token_rejection_stops_sync_for_good(sync_bridge, monkeypatch, body, http_status):
+    client = StopRecordingClient()
+    monkeypatch.setattr(sync_bridge.state, "matrix_client", client)
+
+    run(sync_bridge.on_matrix_response(sync_error(body, http_status)))
+    run(sync_bridge.on_matrix_response(sync_error(body, http_status)))
+
+    assert sync_bridge.MATRIX_SYNC_AUTH_FAILED is True
+    assert client.stops == 1
+
+
+def test_rate_limit_is_neither_fatal_nor_a_restart(sync_bridge, monkeypatch):
+    client = StopRecordingClient()
+    monkeypatch.setattr(sync_bridge.state, "matrix_client", client)
+    error = sync_error({"errcode": "M_LIMIT_EXCEEDED", "error": "Too many requests", "retry_after_ms": 2000}, 429)
+
+    run(sync_bridge.on_matrix_response(error))
+
+    assert sync_bridge.MATRIX_SYNC_AUTH_FAILED is False
+    assert sync_bridge.MATRIX_SYNC_ERROR_STOP is False
+    assert client.stops == 0
+
+
+@pytest.mark.parametrize(
+    "body, http_status",
+    [
+        ({"errcode": "M_UNKNOWN", "error": "Internal server error"}, 500),
+        ({}, 502),
+        # 403 on /sync is not a token rejection (e.g. M_FORBIDDEN); it must not end sync for good.
+        ({"errcode": "M_FORBIDDEN", "error": "Forbidden"}, 403),
+    ],
+    ids=["500", "html-502", "403-forbidden"],
+)
+def test_other_sync_errors_restart_with_backoff(sync_bridge, monkeypatch, body, http_status):
+    client = StopRecordingClient()
+    monkeypatch.setattr(sync_bridge.state, "matrix_client", client)
+
+    run(sync_bridge.on_matrix_response(sync_error(body, http_status)))
+
+    assert sync_bridge.MATRIX_SYNC_AUTH_FAILED is False
+    assert sync_bridge.MATRIX_SYNC_ERROR_STOP is True
+    assert client.stops == 1
+
+
+def test_non_sync_responses_are_ignored(sync_bridge, monkeypatch):
+    client = StopRecordingClient()
+    monkeypatch.setattr(sync_bridge.state, "matrix_client", client)
+    run(sync_bridge.on_matrix_response(nio.LoginError.from_dict({"errcode": "M_UNKNOWN_TOKEN", "error": "x"})))
+    assert client.stops == 0
+
+
+async def run_supervisor_against(sync_bridge, monkeypatch, status, body, content_type, duration):
+    """Runs the real supervisor and nio sync_forever against a loopback homeserver stub.
+
+    Returns (requests_served, supervisor_finished).
+    """
+    from aiohttp import web
+
+    requests = []
+
+    async def sync_handler(request):
+        requests.append(request.path)
+        return web.Response(status=status, text=body, content_type=content_type)
+
+    app = web.Application()
+    app.router.add_get("/_matrix/client/v3/sync", sync_handler)
+    app.router.add_get("/_matrix/client/r0/sync", sync_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    client = nio.AsyncClient(f"http://127.0.0.1:{port}", "@bot:test.invalid")
+    client.access_token = "revoked-token"
+    client.add_response_callback(sync_bridge.on_matrix_response, nio.SyncError)
+    monkeypatch.setattr(sync_bridge.state, "matrix_client", client)
+
+    task = asyncio.create_task(sync_bridge.matrix_sync_loop())
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=duration)
+        finished = True
+    except TimeoutError:
+        finished = False
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        await client.close()
+        await runner.cleanup()
+    return len(requests), finished
+
+
+@pytest.mark.parametrize(
+    "body, content_type",
+    [
+        (json.dumps({"errcode": "M_UNKNOWN_TOKEN", "error": "Unrecognised access token"}), "application/json"),
+        (json.dumps({"errcode": "M_MISSING_TOKEN", "error": "Missing access token"}), "application/json"),
+        ("<html><body>401 Authorization Required</body></html>", "text/html"),
+    ],
+    ids=["unknown-token", "missing-token", "html-401"],
+)
+def test_revoked_token_ends_the_sync_loop_after_one_request(sync_bridge, monkeypatch, body, content_type):
+    served, finished = run(run_supervisor_against(sync_bridge, monkeypatch, 401, body, content_type, duration=5))
+
+    assert finished, "the supervisor must stop on its own after a token rejection"
+    assert served == 1
+    assert sync_bridge.MATRIX_SYNC_AUTH_FAILED is True
+
+
+def test_persistent_server_error_backs_off_instead_of_hot_looping(sync_bridge, monkeypatch):
+    monkeypatch.setattr(sync_bridge, "MATRIX_SYNC_INITIAL_BACKOFF_SECONDS", 0.2)
+    monkeypatch.setattr(sync_bridge, "MATRIX_SYNC_MAX_BACKOFF_SECONDS", 0.2)
+    body = json.dumps({"errcode": "M_UNKNOWN", "error": "Internal server error"})
+
+    served, finished = run(run_supervisor_against(sync_bridge, monkeypatch, 500, body, "application/json", duration=1.0))
+
+    # One request per backoff period (~5 in 1s). Without the stop, nio re-polls immediately
+    # and a loopback server answers hundreds of requests in the same second.
+    assert not finished
+    assert 2 <= served <= 8
+    assert sync_bridge.MATRIX_SYNC_AUTH_FAILED is False
+
+
 # --- Llama Guard category configuration (issue #60) ----------------------------------
 
 
