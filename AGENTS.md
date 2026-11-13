@@ -29,6 +29,7 @@ This file contains development rules and architectural guidelines for AI agents 
 - Any configuration loaded from environment variables (e.g., `TG_API_ID`, `TG_CHANNELS`, `MATRIX_ROOM_IDS` / `MATRIX_ROOM_ID`) must be validated at script startup.
 - Do not let the program fail silently or with unclear tracebacks later in the process. Raise descriptive exceptions if any required variables are missing or empty.
 - Ensure that comma-separated values (like `TG_CHANNELS`) are correctly stripped of extra spaces, and empty elements (such as trailing commas) are ignored.
+- `LLAMAGUARD_CHECKS` / `LLAMAGUARD_REQUIRE_CHECKS` entries must be `S1`–`S14` (`config.parse_category_list()`); anything else stops startup. `config.LLAMAGUARD_CATEGORIES` is the single definition of the valid categories and is shared with `safety.parse_classification()`.
 
 ### Session Persistence
 - The Telethon session file must be stored under the `session/` folder.
@@ -45,6 +46,11 @@ This file contains development rules and architectural guidelines for AI agents 
 ---
 
 ## 4. Content Moderation & Media Processing
+
+### Deduplication Marks
+- The Telegram media ID is marked before the download and the content hash right after it, not after delivery, so a repost arriving mid-processing is suppressed.
+- Every technical failure path must release the marks set so far, so a repost can be retried: a failed download unmarks the media ID (the hash is not set yet); every later failure (safety classification `UNAVAILABLE`, split/compress failure, upload or delivery failure) calls `release_dedup_marks()`. Deliberate policy blocks (`BLOCKED`) keep the marks.
+- A media ID skipped at the content-hash check is tied to that hash with `media_deduplicator.add_alias()`. Releasing the hash releases its aliases; a hash that stays marked keeps them, so reposts are still suppressed before downloading.
 
 ### In-Memory Operations
 - Video frame extraction (for content safety moderation) must be done entirely in-memory (e.g. using `av` and `PIL`). Never write extracted frames or intermediate video clips to disk.
@@ -68,7 +74,13 @@ This file contains development rules and architectural guidelines for AI agents 
 ### Video Splitting & RAM-Disk Processing
 - When handling oversized videos that exceed Matrix homeserver limits, prioritize lossless stream-copy splitting (`-c copy`) over re-encoding to minimize CPU and RAM consumption on low-power devices like Raspberry Pi 4.
 - Because FFmpeg requires seekable filesystem paths to write MP4 `moov` index headers and multi-file segments, video splitting operations must use `/dev/shm` (Linux tmpfs RAM disk) rather than physical disk or microSD storage. Ensure temporary chunk directories are deleted immediately in `finally` blocks.
+- No split part above `MAX_MEDIA_SIZE_BYTES` may ever be posted. `media.split_video_lossless()` checks part sizes right after ffmpeg, before reading, probing or thumbnailing the parts, retries once with a segment time scaled by the overshoot, and otherwise returns `[]`, so `OVERSIZED_VIDEO_FALLBACK_COMPRESS` decides between compression and skipping.
+- Compression output is bounded by `media.compression_scale_filter()`: height to `VIDEO_COMPRESSION_MAX_HEIGHT`, width to the matching 16:9 width, aspect ratio kept, never upscaled, dimensions even (libx264 rejects odd widths).
 - Each split part previews itself: `media.extract_video_thumbnail()` samples a frame in-memory from a little past the middle of that part (a seek lands on the preceding keyframe, then decoding closes the distance) and `handler.process_and_upload_media` uploads one thumbnail per part, computing the part's Blurhash from that same frame. Never hardcode the primary document's thumbnail onto every part. If extraction or the per-part upload fails, fall back to the primary document's Telegram thumbnail instead of sending the part without one.
+
+### Forum Topics
+- Resolve a message's topic only through `handler.resolve_topic_id()`. With `forum_topic` set, `reply_to_top_id` is the topic and `reply_to_msg_id` only the fallback (it is the replied-to message for replies, possibly in another chat); never use `reply_to_msg_id` alone. A message without a forum header belongs to the General topic (`1`), but only when the chat is a forum (`chat.forum`); ordinary channels get no topic.
+- `event.chat` can be `None` when Telethon has not cached the entity; load it with `event.get_chat()` before filtering, or username filters and the General topic cannot be resolved.
 
 ### Alternate Renditions for Oversized Videos
 - Before a video is skipped for exceeding `OVERSIZED_VIDEO_MAX_INPUT_BYTES`, prefer one of Telegram's renditions from `MessageMediaDocument.alt_documents` when `PREFER_ALTERNATE_RENDITION` is enabled: the highest resolution that fits `MAX_MEDIA_SIZE_BYTES` is sent as-is, otherwise the highest that fits the ceiling goes through `OVERSIZED_VIDEO_ACTION`. Selection lives in `media.select_alternate_rendition()`; never select a document that `media.is_rendition_document()` rejects — those are preview/scrub clips of a few dozen KB.
@@ -111,5 +123,5 @@ This file contains development rules and architectural guidelines for AI agents 
 
 ### Before proposing a change
 - `ruff check --extend-select B,LOG,BLE` must pass; that is exactly what CI runs.
-- `pytest` must pass. The suite needs no network and no ffmpeg.
+- `pytest` must pass. The suite needs no external network (one sync test uses a loopback server on 127.0.0.1) and no ffmpeg; the tests that need a real ffmpeg skip themselves without it.
 - The `docker` CI job builds the image and asserts the runtime UID is `10001`. A change that breaks the unprivileged user or the ownership of `/app/session` is a blocker.
