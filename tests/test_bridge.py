@@ -1981,3 +1981,165 @@ def test_real_split_with_sparse_keyframes_is_rejected(bridge, monkeypatch, tmp_p
     assert len(parts) >= 2
     assert all(p["size"] <= int(len(data) * 0.8) for p in parts)
     assert list(scratch.iterdir()) == []
+
+
+# --- Deduplication aliases (issue #52) -----------------------------------------------
+
+
+def test_unmarking_a_key_releases_its_aliases(bridge):
+    dedup = bridge.MediaDeduplicator()
+    dedup.mark_seen("sha256_x")
+    dedup.mark_seen("tg_photo_32")
+    dedup.add_alias("sha256_x", "tg_photo_32")
+
+    dedup.unmark("sha256_x")
+
+    assert dedup.is_duplicate("sha256_x") is False
+    assert dedup.is_duplicate("tg_photo_32") is False
+
+
+def test_aliases_stay_marked_while_their_key_stays_marked(bridge):
+    dedup = bridge.MediaDeduplicator()
+    dedup.mark_seen("sha256_x")
+    dedup.mark_seen("tg_photo_32")
+    dedup.add_alias("sha256_x", "tg_photo_32")
+
+    dedup.unmark("tg_photo_31")  # an unrelated release
+
+    assert dedup.is_duplicate("tg_photo_32") is True
+
+
+def test_alias_links_are_dropped_with_their_key(bridge, monkeypatch):
+    dedup = bridge.MediaDeduplicator(max_size=2)
+    dedup.mark_seen("sha256_x")
+    dedup.mark_seen("tg_photo_32")
+    dedup.add_alias("sha256_x", "tg_photo_32")
+    dedup.mark_seen("tg_photo_33")  # evicts sha256_x (capacity 2)
+
+    assert "sha256_x" not in dedup._aliases
+    # Re-marking the content later must not release the old alias on a failure.
+    dedup.mark_seen("tg_photo_32")  # refresh, so re-marking sha256_x evicts tg_photo_33
+    dedup.mark_seen("sha256_x")
+    dedup.unmark("sha256_x")
+    assert dedup.is_duplicate("tg_photo_32") is True
+
+
+def test_expired_key_drops_its_alias_link(bridge, monkeypatch):
+    dedup = bridge.MediaDeduplicator(ttl_minutes=1)
+    now = [1000.0]
+    monkeypatch.setattr(bridge.state.time, "time", lambda: now[0])
+    dedup.mark_seen("sha256_x")
+    dedup.add_alias("sha256_x", "tg_photo_32")
+
+    now[0] += 61
+    assert dedup.is_duplicate("sha256_x") is False
+    assert "sha256_x" not in dedup._aliases
+
+
+def test_alias_is_ignored_for_unknown_keys_and_when_disabled(bridge):
+    dedup = bridge.MediaDeduplicator()
+    dedup.add_alias("sha256_missing", "tg_photo_32")
+    dedup.add_alias("sha256_x", None)
+    assert dedup._aliases == {}
+
+    disabled = bridge.MediaDeduplicator(enabled=False)
+    disabled.mark_seen("sha256_x")
+    disabled.add_alias("sha256_x", "tg_photo_32")
+    assert disabled._aliases == {}
+
+
+class GatedMatrixClient:
+    """Holds the upload of one filename until the test decides how it ends."""
+
+    def __init__(self, gated_filename):
+        self.gated_filename = gated_filename
+        self.uploading = asyncio.Event()
+        self.release = asyncio.Event()
+        self.gated_succeeds = True
+        self.uploaded = []
+        self.events = []
+
+    async def upload(self, stream, content_type=None, filename=None, filesize=None):
+        if filename == self.gated_filename:
+            self.uploading.set()
+            await self.release.wait()
+            if not self.gated_succeeds:
+                return object(), {}
+        self.uploaded.append(filename)
+        return nio.UploadResponse(content_uri=f"mxc://test.invalid/{filename}"), {}
+
+    async def room_send(self, room_id, message_type, content=None):
+        self.events.append(content)
+        return nio.RoomSendResponse(event_id=f"${len(self.events)}", room_id=room_id)
+
+
+def photo_message(photo_id, filename, data, downloads):
+    async def download_media(file=None, thumb=None):
+        downloads.append(photo_id)
+        return data
+
+    return SimpleNamespace(
+        id=photo_id,
+        photo=SimpleNamespace(id=photo_id, sizes=[]),
+        video=None,
+        document=None,
+        file=SimpleNamespace(mime_type="image/jpeg", name=filename, size=len(data)),
+        download_media=download_media,
+    )
+
+
+async def run_in_flight_duplicate(bridge, client, a_succeeds, data):
+    """A uploads (held); B with another media ID but the same bytes arrives meanwhile;
+    then A finishes; then B's message is reposted. Returns B's downloads and events sent."""
+    downloads = []
+    task_a = asyncio.create_task(
+        bridge.process_and_upload_media(photo_message(31, "a.jpg", data, downloads), "chat", "chan")
+    )
+    await client.uploading.wait()
+
+    await bridge.process_and_upload_media(photo_message(32, "b.jpg", data, downloads), "chat", "chan")
+    events_while_in_flight = len(client.events)
+
+    client.gated_succeeds = a_succeeds
+    client.release.set()
+    await task_a
+
+    await bridge.process_and_upload_media(photo_message(32, "b.jpg", data, downloads), "chat", "chan")
+    return downloads, events_while_in_flight
+
+
+@pytest.fixture
+def fresh_dedup(bridge, monkeypatch):
+    dedup = bridge.MediaDeduplicator()
+    monkeypatch.setattr(sys.modules["state"], "media_deduplicator", dedup)
+    monkeypatch.setattr(bridge, "LLAMAGUARD_API_URL", "")
+    monkeypatch.setattr(bridge, "ENABLE_IMAGES", True)
+    monkeypatch.setattr(bridge, "generate_image_thumbnail", lambda data: None)
+    monkeypatch.setattr(bridge, "compute_blurhash", lambda data: None)
+    return dedup
+
+
+def test_alias_is_retried_after_the_original_fails(bridge, monkeypatch, fresh_dedup):
+    client = GatedMatrixClient("a.jpg")
+    monkeypatch.setattr(bridge, "matrix_client", client)
+
+    downloads, events_while_in_flight = run(run_in_flight_duplicate(bridge, client, False, b"same-bytes-fail"))
+
+    assert events_while_in_flight == 0  # B was not sent while A was in flight
+    assert downloads == [31, 32, 32]  # the repost of B was downloaded again ...
+    assert client.uploaded == ["b.jpg"]  # ... and delivered once
+    assert len(client.events) == 1
+    assert fresh_dedup.is_duplicate("tg_photo_31") is False
+
+
+def test_alias_stays_suppressed_after_the_original_succeeds(bridge, monkeypatch, fresh_dedup):
+    client = GatedMatrixClient("a.jpg")
+    monkeypatch.setattr(bridge, "matrix_client", client)
+
+    downloads, events_while_in_flight = run(run_in_flight_duplicate(bridge, client, True, b"same-bytes-ok"))
+
+    assert events_while_in_flight == 0
+    assert downloads == [31, 32]  # the repost of B was suppressed before downloading
+    assert client.uploaded == ["a.jpg"]
+    assert len(client.events) == 1
+    assert fresh_dedup.is_duplicate("tg_photo_32") is True
