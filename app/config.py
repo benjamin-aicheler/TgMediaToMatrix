@@ -34,6 +34,37 @@ def get_env_bool(key: str, default: bool) -> bool:
         return default
     return val.strip().lower() in ("true", "1", "yes", "on")
 
+# The Llama Guard categories the safety prompt defines. Shared with safety.parse_classification()
+# so the configured lists and the parsed classifier output use exactly the same names.
+LLAMAGUARD_CATEGORIES = frozenset(f"S{i}" for i in range(1, 15))
+
+
+def parse_category_list(key: str, raw: str | None) -> set[str]:
+    """Parses a comma-separated Llama Guard category list such as 'S1, S4'.
+
+    Every entry must be exactly one of S1-S14 (case-insensitive). Anything else (S04, 4,
+    'S4 S12', S15) would never match the classifier's output and silently disable the
+    check, so it is rejected at startup instead. Empty entries are ignored.
+    """
+    categories = set()
+    invalid = []
+    for entry in (raw or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        category = entry.upper()
+        if category in LLAMAGUARD_CATEGORIES:
+            categories.add(category)
+        else:
+            invalid.append(entry)
+    if invalid:
+        raise ValueError(
+            f"{key} contains unknown Llama Guard categories {invalid}. "
+            f"Use a comma-separated list of S1 to S14, e.g. 'S1,S4'."
+        )
+    return categories
+
+
 try:
     TG_API_ID = int(get_env_or_raise("TG_API_ID"))
     TG_API_HASH = get_env_or_raise("TG_API_HASH")
@@ -162,21 +193,10 @@ try:
 
     LLAMAGUARD_RANDOM_FRAMES = get_env_bool("LLAMAGUARD_RANDOM_FRAMES", True)
 
-    LLAMAGUARD_CHECKS = set()
-    checks_raw = os.environ.get("LLAMAGUARD_CHECKS", "")
-    if checks_raw:
-        for check in checks_raw.split(','):
-            check = check.strip()
-            if check:
-                LLAMAGUARD_CHECKS.add(check.upper())
-
-    LLAMAGUARD_REQUIRE_CHECKS = set()
-    req_checks_raw = os.environ.get("LLAMAGUARD_REQUIRE_CHECKS", "")
-    if req_checks_raw:
-        for check in req_checks_raw.split(','):
-            check = check.strip()
-            if check:
-                LLAMAGUARD_REQUIRE_CHECKS.add(check.upper())
+    LLAMAGUARD_CHECKS = parse_category_list("LLAMAGUARD_CHECKS", os.environ.get("LLAMAGUARD_CHECKS"))
+    LLAMAGUARD_REQUIRE_CHECKS = parse_category_list(
+        "LLAMAGUARD_REQUIRE_CHECKS", os.environ.get("LLAMAGUARD_REQUIRE_CHECKS")
+    )
 
     # Extract channels, ignoring empty elements, supporting channel_id:topic_id formats
     TG_CHANNELS_RAW = get_env_or_raise("TG_CHANNELS")
