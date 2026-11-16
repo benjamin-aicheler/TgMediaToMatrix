@@ -1,6 +1,6 @@
 # Base image pinned by its multi-arch index digest so that a rebuild cannot silently pick up
 # a different Python patch level. Bump deliberately (and re-run the CI image build) when needed.
-FROM python:3.13-slim@sha256:2d44738ebf4ce5f63b9d9ea871e9c7cfdc0426f7b0c97cac915fd88ded1d86bb
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 # Prevent Python from writing .pyc files and enable unbuffered output
 ENV PYTHONDONTWRITEBYTECODE=1 \
