@@ -2,6 +2,6 @@
 # the suite does not need them, and they would only slow the CI job down.
 # Generated into requirements-dev.txt with
 # `uv pip compile requirements-dev.in --python-version 3.13 -o requirements-dev.txt`.
-telethon==1.45.0
+telethon==1.46.0
 matrix-nio==0.26.0
 pytest==9.2.0
